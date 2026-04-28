@@ -1,0 +1,27 @@
+{
+    "name": "company/invoice-system",
+    "description": "سیستم مدیریت فاکتورهای شرکت پیمانکاری",
+    "type": "project",
+    "keywords": ["invoice", "management", "php", "mvc"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Your Company",
+            "email": "info@company.com"
+        }
+    ],
+    "require": {
+        "php": ">=7.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/"
+        },
+        "files": [
+            "app/Helpers/constants.php",
+            "app/Helpers/functions.php"
+        ]
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

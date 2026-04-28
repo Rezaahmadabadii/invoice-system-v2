@@ -1,0 +1,12 @@
+C:\xampp\htdocs\invoice-system-v2\database\
+├── 01_create_users.sql
+├── 02_create_companies.sql
+├── 03_create_vendors.sql
+├── 04_create_workshops.sql
+├── 05_create_departments.sql
+├── 06_create_roles_permissions.sql
+├── 07_create_documents.sql
+├── 08_create_activities.sql
+├── 09_create_forwarding.sql
+├── 10_create_notifications.sql
+└── install.php
