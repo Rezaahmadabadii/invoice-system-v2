@@ -22,76 +22,88 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// دریافت فیلترها
-$search = $_GET['search'] ?? '';
+$companies = $pdo->query("SELECT id, name, short_name FROM companies ORDER BY name")->fetchAll();
+
+$filter_company = $_GET['company'] ?? '';
 $filter_status = $_GET['status'] ?? '';
+$search = $_GET['search'] ?? '';
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$per_page = 15;
+$offset = ($page - 1) * $per_page;
 
-// شرط نمایش فاکتورها بر اساس دسترسی کاربر
-$sql = "
-    SELECT d.*, 
-           c.name as company_name,
-           c.short_name,
-           v.name as vendor_name,
-           u.full_name as creator_name,
-           holder_dep.name as holder_department_name,
-           holder_user.full_name as holder_user_name
-    FROM documents d
-    LEFT JOIN companies c ON d.company_id = c.id
-    LEFT JOIN vendors v ON d.vendor_id = v.id
-    LEFT JOIN users u ON d.created_by = u.id
-    LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
-    LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
-    WHERE d.type = 'invoice'
-    AND (
-        d.created_by = ?
-        OR d.current_holder_user_id = ?
-        OR d.current_holder_department_id IN (" . implode(',', array_fill(0, count($user_role_ids), '?')) . ")
-    )
-";
+$base_sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name 
+             FROM documents d 
+             LEFT JOIN companies c ON d.company_id = c.id 
+             LEFT JOIN vendors v ON d.vendor_id = v.id 
+             WHERE d.type = 'invoice'";
+$params = [];
 
-$params = array_merge([$user_id, $user_id], $user_role_ids);
-
-if (!empty($filter_status)) {
-    $sql .= " AND d.status = ?";
+if ($filter_company) {
+    $base_sql .= " AND d.company_id = ?";
+    $params[] = $filter_company;
+}
+if ($filter_status) {
+    $base_sql .= " AND d.status = ?";
     $params[] = $filter_status;
 }
-
-if (!empty($search)) {
-    $sql .= " AND (d.document_number LIKE ? OR d.title LIKE ? OR c.name LIKE ?)";
+if ($search) {
+    $base_sql .= " AND (d.document_number LIKE ? OR d.title LIKE ? OR d.cargo_description LIKE ? OR c.name LIKE ?)";
+    $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
 }
 
-$sql .= " ORDER BY d.created_at DESC";
+$count_sql = str_replace("SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name", "SELECT COUNT(*) as total", $base_sql);
+$stmt = $pdo->prepare($count_sql);
+$stmt->execute($params);
+$total_count = $stmt->fetchColumn();
+$total_pages = $total_count > 0 ? ceil($total_count / $per_page) : 1;
+
+$sql = $base_sql . " ORDER BY d.created_at DESC LIMIT " . (int)$per_page . " OFFSET " . (int)$offset;
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $invoices = $stmt->fetchAll();
 
-// وضعیت‌های مجاز برای ویرایش/حذف توسط ایجادکننده
-$editable_statuses = ['draft', 'forwarded']; // فقط زمانی که هنوز مشاهده نشده باشد
+$total_invoices = $pdo->query("SELECT COUNT(*) FROM documents WHERE type = 'invoice'")->fetchColumn();
+$completed_invoices = $pdo->query("SELECT COUNT(*) FROM documents WHERE type = 'invoice' AND status = 'completed'")->fetchColumn();
+$pending_invoices = $pdo->query("SELECT COUNT(*) FROM documents WHERE type = 'invoice' AND status = 'pending'")->fetchColumn();
 
-$page_title = 'همه فاکتورها';
+$status_colors = [
+    'pending' => '#fef9e6',
+    'forwarded' => '#f39c12',
+    'approved' => '#2ecc71',
+    'rejected' => '#e74c3c',
+    'draft' => '#95a5a6',
+    'cancelled' => '#e74c3c'
+];
+
+$status_texts = [
+    'pending' => '⏳ در انتظار اقدام',
+    'forwarded' => '🔄 ارسال شده',
+    'approved' => '✅ تایید شده',
+    'rejected' => '❌ رد شده',
+    'draft' => '📝 پیش‌نویس',
+    'cancelled' => '🚫 لغو شده'
+];
+
+$page_title = 'مدیریت فاکتورها';
 ob_start();
 ?>
 
 <style>
-    .page-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 25px;
-        flex-wrap: wrap;
-        gap: 15px;
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 20px;
+        margin-bottom: 30px;
     }
-    .page-header h1 {
-        margin: 0;
-        font-size: 24px;
-        color: #2c3e50;
-        display: flex;
-        align-items: center;
-        gap: 10px;
+    .stat-card {
+        padding: 20px;
+        border-radius: 12px;
+        color: white;
     }
+    
     .filters-container {
         background: white;
         border-radius: 12px;
@@ -143,38 +155,83 @@ ob_start();
         background: #95a5a6;
     }
     
-    /* کارت‌ها */
-    .invoices-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-        gap: 20px;
+    .cards-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
     }
     .invoice-card {
-        background: white;
-        border-radius: 16px;
+        border-radius: 14px;
         overflow: hidden;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        transition: all 0.3s ease;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        transition: all 0.2s ease;
         border: 1px solid #eef2f5;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        flex-wrap: wrap;
+        gap: 10px;
     }
     .invoice-card:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+        transform: translateX(-3px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.1);
+        border-color: #3498db20;
     }
-    .card-header {
-        background: linear-gradient(135deg, #f8f9fa, #fff);
-        padding: 15px 20px;
-        border-bottom: 1px solid #eef2f5;
+    
+    .card-status-pending { background: #fef9e6; border-right: 4px solid #f39c12; }
+    .card-status-forwarded { background: #fff3cd; border-right: 4px solid #f39c12; }
+    .card-status-approved { background: #d4edda; border-right: 4px solid #2ecc71; }
+    .card-status-rejected { background: #f8d7da; border-right: 4px solid #e74c3c; }
+    .card-status-draft { background: #f5f5f5; border-right: 4px solid #95a5a6; }
+    .card-status-cancelled { background: #f8d7da; border-right: 4px solid #e74c3c; }
+    
+    .card-info {
         display: flex;
-        justify-content: space-between;
         align-items: center;
+        gap: 20px;
+        flex-wrap: wrap;
+        flex: 1;
     }
     .doc-number {
         font-weight: bold;
-        font-size: 16px;
+        font-size: 13px;
+        background: linear-gradient(135deg, #3498db10, #3498db20);
+        padding: 5px 12px;
+        border-radius: 20px;
         color: #2c3e50;
-        background: #eef2f5;
-        padding: 4px 12px;
+        direction: ltr;
+        font-family: monospace;
+    }
+    .doc-number i {
+        color: #3498db;
+        margin-left: 5px;
+    }
+    .title {
+        font-size: 14px;
+        font-weight: 500;
+        color: #2c3e50;
+        min-width: 150px;
+    }
+    .company, .vendor, .amount, .holder {
+        font-size: 12px;
+        color: #7f8c8d;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+    .amount {
+        color: #27ae60;
+        font-weight: bold;
+    }
+    .route {
+        font-size: 12px;
+        color: #7f8c8d;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        background: #f8f9fa;
+        padding: 4px 10px;
         border-radius: 20px;
     }
     .status-badge {
@@ -182,96 +239,49 @@ ob_start();
         border-radius: 20px;
         font-size: 11px;
         font-weight: 500;
-    }
-    .status-draft { background: #95a5a6; color: white; }
-    .status-forwarded { background: #f39c12; color: white; }
-    .status-viewed { background: #3498db; color: white; }
-    .status-under_review { background: #9b59b6; color: white; }
-    .status-approved { background: #27ae60; color: white; }
-    .status-rejected { background: #e74c3c; color: white; }
-    .status-completed { background: #1abc9c; color: white; }
-    
-    .card-body {
-        padding: 15px 20px;
-    }
-    .card-title {
-        font-size: 16px;
-        font-weight: 600;
-        color: #2c3e50;
-        margin-bottom: 12px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .card-details {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-bottom: 12px;
-    }
-    .detail-item {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 13px;
-        color: #7f8c8d;
-    }
-    .detail-item i {
-        width: 20px;
-        color: #3498db;
-    }
-    .detail-item strong {
-        color: #2c3e50;
-        font-weight: 500;
-    }
-    .holder-info {
-        background: #e8f4f8;
-        border-radius: 10px;
-        padding: 10px;
-        margin-top: 12px;
-        font-size: 12px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
+        min-width: 70px;
+        text-align: center;
     }
     .card-actions {
         display: flex;
         gap: 8px;
-        padding: 12px 20px;
-        border-top: 1px solid #eef2f5;
-        background: #fafbfc;
     }
     .action-btn {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        justify-content: center;
+        gap: 5px;
         padding: 6px 12px;
         border-radius: 8px;
-        font-size: 13px;
+        font-size: 12px;
         text-decoration: none;
         transition: all 0.2s;
     }
     .action-btn.view {
+        background: #e8f4fd;
+        color: #3498db;
+    }
+    .action-btn.view:hover {
         background: #3498db;
         color: white;
     }
-    .action-btn.view:hover {
-        background: #2980b9;
-    }
     .action-btn.edit {
+        background: #fef5e8;
+        color: #f39c12;
+    }
+    .action-btn.edit:hover {
         background: #f39c12;
         color: white;
     }
-    .action-btn.edit:hover {
-        background: #e67e22;
-    }
     .action-btn.delete {
+        background: #fee8e8;
+        color: #e74c3c;
+    }
+    .action-btn.delete:hover {
         background: #e74c3c;
         color: white;
     }
-    .action-btn.delete:hover {
-        background: #c0392b;
-    }
+    
     .empty-state {
         text-align: center;
         padding: 60px;
@@ -285,174 +295,156 @@ ob_start();
         display: block;
     }
     
+    @media (max-width: 1200px) {
+        .card-info { gap: 12px; }
+        .vendor, .amount { display: none; }
+    }
+    @media (max-width: 992px) {
+        .card-info { gap: 10px; }
+        .title { min-width: 120px; font-size: 13px; }
+        .company { min-width: 80px; }
+    }
     @media (max-width: 768px) {
-        .invoices-grid {
-            grid-template-columns: 1fr;
-        }
-        .filters-container {
-            flex-direction: column;
-        }
-        .filters-container > * {
-            width: 100%;
-        }
+        .invoice-card { flex-direction: column; align-items: flex-start; }
+        .card-info { width: 100%; }
+        .card-actions { width: 100%; justify-content: flex-end; }
+        .stats-grid { grid-template-columns: repeat(2, 1fr); }
+        .filters-container { flex-direction: column; }
+        .filters-container > * { width: 100%; }
     }
 </style>
 
-<div class="page-header">
-    <h1>
-        <i class="fas fa-file-invoice" style="color: #3498db;"></i>
-        همه فاکتورها
-        <span style="font-size: 14px; background: #eef2f5; padding: 2px 10px; border-radius: 20px; color: #7f8c8d;">
-            <?php echo count($invoices); ?> فاکتور
-        </span>
-    </h1>
-    <a href="invoice-create.php" style="background: #27ae60; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none;">
-        <i class="fas fa-plus"></i> فاکتور جدید
-    </a>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
+    <h1 style="color: #2c3e50; margin: 0;">📄 مدیریت فاکتورها</h1>
+    <div style="display: flex; gap: 10px;">
+        <a href="invoice-create.php" style="background: #27ae60; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">
+            <i class="fas fa-plus"></i> فاکتور جدید
+        </a>
+        <a href="dashboard.php" style="background: #95a5a6; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">
+            <i class="fas fa-arrow-right"></i> بازگشت
+        </a>
+    </div>
 </div>
 
-<!-- =============== کد نمایش پیام‌ها  =============== -->
-<?php if (isset($_SESSION['message'])): ?>
-    <div style="background: #d4edda; color: #155724; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-right: 4px solid #27ae60;">
-        <i class="fas fa-check-circle"></i> <?php echo $_SESSION['message']; unset($_SESSION['message']); ?>
+<div class="stats-grid">
+    <div class="stat-card" style="background: linear-gradient(135deg, #3498db, #2980b9);">
+        <div style="font-size: 14px;">📋 کل فاکتورها</div>
+        <div style="font-size: 32px; font-weight: bold;"><?php echo number_format($total_invoices); ?></div>
     </div>
-<?php endif; ?>
-<?php if (isset($_SESSION['error'])): ?>
-    <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-right: 4px solid #e74c3c;">
-        <i class="fas fa-exclamation-triangle"></i> <?php echo $_SESSION['error']; unset($_SESSION['error']); ?>
+    <div class="stat-card" style="background: linear-gradient(135deg, #2ecc71, #27ae60);">
+        <div style="font-size: 14px;">✅ تایید شده</div>
+        <div style="font-size: 32px; font-weight: bold;"><?php echo number_format($completed_invoices); ?></div>
     </div>
-<?php endif; ?>
-<!-- ============================================================= -->
-<!-- فیلترها -->
+    <div class="stat-card" style="background: linear-gradient(135deg, #f39c12, #e67e22);">
+        <div style="font-size: 14px;">⏳ در انتظار</div>
+        <div style="font-size: 32px; font-weight: bold;"><?php echo number_format($pending_invoices); ?></div>
+    </div>
+    <div class="stat-card" style="background: linear-gradient(135deg, #e74c3c, #c0392b);">
+        <div style="font-size: 14px;">❌ رد شده</div>
+        <div style="font-size: 32px; font-weight: bold;"><?php echo number_format($total_invoices - $completed_invoices - $pending_invoices); ?></div>
+    </div>
+</div>
+
 <div class="filters-container">
     <div class="search-box">
         <i class="fas fa-search"></i>
-        <input type="text" id="searchInput" placeholder="جستجوی شماره، عنوان یا شرکت..." value="<?php echo htmlspecialchars($search); ?>">
+        <input type="text" id="searchInput" placeholder="جستجوی شماره، عنوان، شرکت..." value="<?php echo htmlspecialchars($search); ?>">
     </div>
     <div class="status-filter">
         <select id="statusFilter">
             <option value="">همه وضعیت‌ها</option>
-            <option value="draft" <?php echo $filter_status == 'draft' ? 'selected' : ''; ?>>پیش‌نویس</option>
-            <option value="forwarded" <?php echo $filter_status == 'forwarded' ? 'selected' : ''; ?>>ارسال شده</option>
-            <option value="viewed" <?php echo $filter_status == 'viewed' ? 'selected' : ''; ?>>مشاهده شده</option>
-            <option value="under_review" <?php echo $filter_status == 'under_review' ? 'selected' : ''; ?>>در حال بررسی</option>
-            <option value="approved" <?php echo $filter_status == 'approved' ? 'selected' : ''; ?>>تایید شده</option>
-            <option value="rejected" <?php echo $filter_status == 'rejected' ? 'selected' : ''; ?>>رد شده</option>
-            <option value="completed" <?php echo $filter_status == 'completed' ? 'selected' : ''; ?>>بسته شده</option>
+            <option value="draft" <?php echo $filter_status == 'draft' ? 'selected' : ''; ?>>📝 پیش‌نویس</option>
+            <option value="pending" <?php echo $filter_status == 'pending' ? 'selected' : ''; ?>>⏳ در انتظار</option>
+            <option value="forwarded" <?php echo $filter_status == 'forwarded' ? 'selected' : ''; ?>>📨 ارسال شده</option>
+            <option value="approved" <?php echo $filter_status == 'approved' ? 'selected' : ''; ?>>✅ تایید شده</option>
+            <option value="rejected" <?php echo $filter_status == 'rejected' ? 'selected' : ''; ?>>❌ رد شده</option>
+            <option value="cancelled" <?php echo $filter_status == 'cancelled' ? 'selected' : ''; ?>>🚫 لغو شده</option>
+        </select>
+    </div>
+    <div class="status-filter">
+        <select id="companyFilter">
+            <option value="">🏢 همه شرکت‌ها</option>
+            <?php foreach ($companies as $comp): ?>
+                <option value="<?php echo $comp['id']; ?>" <?php echo $filter_company == $comp['id'] ? 'selected' : ''; ?>><?php echo $comp['name']; ?></option>
+            <?php endforeach; ?>
         </select>
     </div>
     <button class="filter-btn" id="applyFilterBtn">اعمال فیلتر</button>
     <a href="inbox.php" class="filter-btn reset">پاک کردن</a>
 </div>
 
-<!-- لیست فاکتورها به صورت کارت -->
-<div class="invoices-grid">
-    <?php if (empty($invoices)): ?>
-        <div class="empty-state" style="grid-column: 1/-1;">
-            <i class="fas fa-inbox"></i>
-            <p>هیچ فاکتوری یافت نشد</p>
-            <a href="invoice-create.php" style="background: #27ae60; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; display: inline-block; margin-top: 15px;">
-                <i class="fas fa-plus"></i> ایجاد فاکتور جدید
-            </a>
-        </div>
-    <?php else: ?>
+<?php if (empty($invoices)): ?>
+    <div class="empty-state">
+        <i class="fas fa-file-invoice"></i>
+        <p>هیچ فاکتوری یافت نشد</p>
+        <a href="invoice-create.php" style="background: #27ae60; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; display: inline-block; margin-top: 15px;">
+            <i class="fas fa-plus"></i> ایجاد فاکتور جدید
+        </a>
+    </div>
+<?php else: ?>
+    <div class="cards-list">
         <?php foreach ($invoices as $inv): 
-            $status_class = 'status-' . ($inv['status'] ?? 'draft');
-            $status_text = [
-                'draft' => 'پیش‌نویس',
-                'forwarded' => 'ارسال شده',
-                'viewed' => 'مشاهده شده',
-                'under_review' => 'در حال بررسی',
-                'approved' => 'تایید شده',
-                'rejected' => 'رد شده',
-                'completed' => 'بسته شده'
-            ][$inv['status']] ?? $inv['status'];
-            
-            // شرط نمایش دکمه ویرایش/حذف: فقط اگر کاربر ایجادکننده باشد و فاکتور هنوز مشاهده نشده باشد
-            $can_edit = ($inv['created_by'] == $user_id && in_array($inv['status'], $editable_statuses));
-            // ادمین می‌تواند در هر شرایطی که فاکتور بسته نشده باشد ویرایش/حذف کند (اختیاری)
-            $is_admin = in_array('admin', $_SESSION['user_roles'] ?? []) || in_array('super_admin', $_SESSION['user_roles'] ?? []);
+            $display_number = $inv['document_number'];
         ?>
-        <div class="invoice-card">
-            <div class="card-header">
+        <div class="invoice-card card-status-<?php echo $inv['status']; ?>">
+            <div class="card-info">
                 <span class="doc-number">
-                    <i class="fas fa-hashtag"></i> <?php echo htmlspecialchars($inv['document_number']); ?>
+                    <i class="fas fa-file-alt"></i> <?php echo $display_number; ?>
                 </span>
-                <span class="status-badge <?php echo $status_class; ?>"><?php echo $status_text; ?></span>
+                <span class="title"><?php echo htmlspecialchars($inv['title']); ?></span>
+                <span class="company"><i class="fas fa-building"></i> <?php echo htmlspecialchars($inv['company_name'] ?? '-'); ?></span>
+                <span class="vendor"><i class="fas fa-store"></i> <?php echo htmlspecialchars($inv['vendor_name'] ?? '-'); ?></span>
+                <span class="amount"><i class="fas fa-money-bill-wave"></i> <?php echo number_format($inv['amount'] ?? 0); ?> تومان</span>
             </div>
-            <div class="card-body">
-                <div class="card-title">
-                    <i class="fas fa-tag" style="color: #3498db;"></i>
-                    <?php echo htmlspecialchars($inv['title']); ?>
-                </div>
-                <div class="card-details">
-                    <div class="detail-item">
-                        <i class="fas fa-building"></i>
-                        <span><?php echo htmlspecialchars($inv['company_name'] ?? '-'); ?></span>
-                    </div>
-                    <div class="detail-item">
-                        <i class="fas fa-store"></i>
-                        <span><?php echo htmlspecialchars($inv['vendor_name'] ?? '-'); ?></span>
-                    </div>
-                    <div class="detail-item">
-                        <i class="fas fa-money-bill-wave"></i>
-                        <strong><?php echo number_format($inv['amount']); ?></strong> <span>تومان</span>
-                    </div>
-                    <div class="detail-item">
-                        <i class="fas fa-calendar"></i>
-                        <span><?php echo jdate('Y/m/d', strtotime($inv['created_at'])); ?></span>
-                    </div>
-                </div>
-                <div class="holder-info">
-                    <i class="fas fa-user-check"></i>
-                    <span>در دست:</span>
-                    <strong>
-                        <?php
-                        if ($inv['holder_user_name']) {
-                            echo htmlspecialchars($inv['holder_user_name']);
-                        } elseif ($inv['holder_department_name']) {
-                            echo htmlspecialchars($inv['holder_department_name']) . ' (بخش)';
-                        } else {
-                            echo '-';
-                        }
-                        ?>
-                    </strong>
-                </div>
-            </div>
+            <span class="status-badge" style="background: <?php echo $status_colors[$inv['status']] ?? '#95a5a6'; ?>; color: <?php echo in_array($inv['status'], ['pending', 'draft']) ? '#7f8c8d' : 'white'; ?>;">
+                <?php echo $status_texts[$inv['status']] ?? $inv['status']; ?>
+            </span>
             <div class="card-actions">
-                <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view">
-                    <i class="fas fa-eye"></i> مشاهده
+                <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده">
+                    <i class="fas fa-eye"></i>
                 </a>
-                <?php if ($can_edit || $is_admin): ?>
-                    <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit">
-                        <i class="fas fa-edit"></i> ویرایش
+                <?php if ($inv['created_by'] == $user_id): ?>
+                    <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش">
+                        <i class="fas fa-edit"></i>
                     </a>
-                    <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" onclick="return confirm('آیا از حذف این فاکتور اطمینان دارید؟')">
-                        <i class="fas fa-trash-alt"></i> حذف
+                    <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')">
+                        <i class="fas fa-trash-alt"></i>
                     </a>
                 <?php endif; ?>
             </div>
         </div>
         <?php endforeach; ?>
+    </div>
+
+    <?php if ($total_pages > 1): ?>
+    <div style="display: flex; justify-content: center; gap: 10px; margin-top: 20px;">
+        <a href="?page=1<?php echo $filter_company ? "&company=$filter_company" : ''; ?><?php echo $filter_status ? "&status=$filter_status" : ''; ?><?php echo $search ? "&search=" . urlencode($search) : ''; ?>" style="background: #3498db; color: white; padding: 8px 15px; border-radius: 5px; text-decoration: none;"><<</a>
+        <?php if ($page > 1): ?>
+            <a href="?page=<?php echo $page - 1; ?><?php echo $filter_company ? "&company=$filter_company" : ''; ?><?php echo $filter_status ? "&status=$filter_status" : ''; ?><?php echo $search ? "&search=" . urlencode($search) : ''; ?>" style="background: #3498db; color: white; padding: 8px 15px; border-radius: 5px; text-decoration: none;"><</a>
+        <?php endif; ?>
+        <span style="padding: 8px 15px; background: #2c3e50; color: white; border-radius: 5px;"><?php echo $page; ?></span>
+        <?php if ($page < $total_pages): ?>
+            <a href="?page=<?php echo $page + 1; ?><?php echo $filter_company ? "&company=$filter_company" : ''; ?><?php echo $filter_status ? "&status=$filter_status" : ''; ?><?php echo $search ? "&search=" . urlencode($search) : ''; ?>" style="background: #3498db; color: white; padding: 8px 15px; border-radius: 5px; text-decoration: none;">></a>
+        <?php endif; ?>
+        <a href="?page=<?php echo $total_pages; ?><?php echo $filter_company ? "&company=$filter_company" : ''; ?><?php echo $filter_status ? "&status=$filter_status" : ''; ?><?php echo $search ? "&search=" . urlencode($search) : ''; ?>" style="background: #3498db; color: white; padding: 8px 15px; border-radius: 5px; text-decoration: none;">>></a>
+    </div>
     <?php endif; ?>
-</div>
+<?php endif; ?>
 
 <script>
-// فیلتر با جاوااسکریپت
-document.getElementById('applyFilterBtn').addEventListener('click', function() {
+document.getElementById('applyFilterBtn')?.addEventListener('click', function() {
     let search = document.getElementById('searchInput').value;
     let status = document.getElementById('statusFilter').value;
+    let company = document.getElementById('companyFilter').value;
     let url = 'inbox.php?';
     if (search) url += 'search=' + encodeURIComponent(search);
     if (status) url += (search ? '&' : '') + 'status=' + encodeURIComponent(status);
+    if (company) url += (search || status ? '&' : '') + 'company=' + encodeURIComponent(company);
     window.location.href = url;
 });
 
-// Enter در جستجو
-document.getElementById('searchInput').addEventListener('keypress', function(e) {
-    if (e.key === 'Enter') {
-        document.getElementById('applyFilterBtn').click();
-    }
+document.getElementById('searchInput')?.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') document.getElementById('applyFilterBtn').click();
 });
 </script>
 

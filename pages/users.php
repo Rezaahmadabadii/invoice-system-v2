@@ -19,26 +19,21 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// پردازش ریست رمز توسط ادمین
+// ریست رمز
 $successMessage = '';
 $errorMessage = '';
 
 if (isset($_GET['reset_password']) && is_numeric($_GET['reset_password']) && isSuperAdmin()) {
     $user_id_to_reset = $_GET['reset_password'];
-    
-    // تولید رمز عبور موقت 8 کاراکتری
     $temp_password = substr(str_shuffle('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'), 0, 8);
     $hashed_password = password_hash($temp_password, PASSWORD_DEFAULT);
     
     $updateStmt = $pdo->prepare("UPDATE users SET password = ? WHERE id = ?");
     if ($updateStmt->execute([$hashed_password, $user_id_to_reset])) {
-        $userStmt = $pdo->prepare("SELECT email, full_name FROM users WHERE id = ?");
+        $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE id = ?");
         $userStmt->execute([$user_id_to_reset]);
         $user = $userStmt->fetch();
-        
         $successMessage = "رمز عبور کاربر {$user['full_name']} با موفقیت ریست شد. رمز موقت جدید: <strong>{$temp_password}</strong>";
-        // ارسال ایمیل به کاربر (اختیاری)
-        // sendTemporaryPasswordEmail($user['email'], $user['full_name'], $temp_password);
     } else {
         $errorMessage = "خطایی در ریست کردن رمز عبور رخ داد.";
     }
@@ -47,27 +42,25 @@ if (isset($_GET['reset_password']) && is_numeric($_GET['reset_password']) && isS
 // حذف کاربر
 if (isset($_GET['delete']) && is_numeric($_GET['delete']) && isSuperAdmin()) {
     $id = $_GET['delete'];
-    $stmt = $pdo->prepare("DELETE FROM users WHERE id = ?");
-    $stmt->execute([$id]);
+    $pdo->prepare("DELETE FROM users WHERE id = ?")->execute([$id]);
+    $pdo->prepare("DELETE FROM user_roles WHERE user_id = ?")->execute([$id]);
     header('Location: users.php');
     exit;
 }
 
-// دریافت فیلترها
+// فیلترها
 $search = $_GET['search'] ?? '';
 $role_filter = $_GET['role'] ?? '';
 $department_filter = $_GET['department'] ?? '';
 
-// ساخت کوئری
-$sql = "SELECT u.*, 
+$sql = "SELECT u.id, u.full_name, u.username, u.department_id, u.created_at,
         (SELECT GROUP_CONCAT(r.name) FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = u.id) as role_names,
         (SELECT GROUP_CONCAT(r.id) FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = u.id) as role_ids
         FROM users u WHERE 1=1";
 $params = [];
 
 if ($search) {
-    $sql .= " AND (u.full_name LIKE ? OR u.email LIKE ? OR u.username LIKE ?)";
-    $params[] = "%$search%";
+    $sql .= " AND (u.full_name LIKE ? OR u.username LIKE ?)";
     $params[] = "%$search%";
     $params[] = "%$search%";
 }
@@ -87,35 +80,31 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $users = $stmt->fetchAll();
 
-// دریافت لیست نقش‌ها برای فیلتر
-$roles = $pdo->query("SELECT id, name FROM roles ORDER BY name")->fetchAll();
-
-// دریافت لیست بخش‌ها برای فیلتر
+$roles = $pdo->query("SELECT id, name FROM roles WHERE is_department = 0 ORDER BY name")->fetchAll();
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
 
-// پردازش افزودن کاربر جدید
+// افزودن کاربر جدید
 $add_error = '';
 $add_success = '';
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_user'])) {
     $fullname = trim($_POST['fullname'] ?? '');
-    $email = trim($_POST['email'] ?? '');
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
     $role_id = $_POST['role_id'] ?? '';
     $department_id = $_POST['department_id'] ?? '';
     
-    if (empty($fullname) || empty($email) || empty($username) || empty($password) || empty($role_id)) {
+    if (empty($fullname) || empty($username) || empty($password) || empty($role_id)) {
         $add_error = 'لطفاً تمام فیلدهای الزامی را پر کنید';
     } else {
-        $check = $pdo->prepare("SELECT id FROM users WHERE username = ? OR email = ?");
-        $check->execute([$username, $email]);
+        $check = $pdo->prepare("SELECT id FROM users WHERE username = ?");
+        $check->execute([$username]);
         if ($check->rowCount() > 0) {
-            $add_error = 'این نام کاربری یا ایمیل قبلاً ثبت شده است';
+            $add_error = 'این نام کاربری قبلاً ثبت شده است';
         } else {
             $hashed = password_hash($password, PASSWORD_DEFAULT);
-            $insert = $pdo->prepare("INSERT INTO users (full_name, email, username, password, department_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
-            if ($insert->execute([$fullname, $email, $username, $hashed, $department_id ?: null])) {
+            $insert = $pdo->prepare("INSERT INTO users (full_name, username, password, department_id, created_at) VALUES (?, ?, ?, ?, NOW())");
+            if ($insert->execute([$fullname, $username, $hashed, $department_id ?: null])) {
                 $user_id = $pdo->lastInsertId();
                 $role_stmt = $pdo->prepare("INSERT INTO user_roles (user_id, role_id, assigned_by) VALUES (?, ?, ?)");
                 $role_stmt->execute([$user_id, $role_id, $_SESSION['user_id']]);
@@ -133,253 +122,397 @@ ob_start();
 ?>
 
 <style>
-    .user-table {
-        width: 100%;
-        border-collapse: collapse;
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    .filter-buttons {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 25px;
+        flex-wrap: wrap;
     }
-    .user-table th, .user-table td {
-        padding: 12px;
-        text-align: right;
-        border-bottom: 1px solid #eee;
-    }
-    .user-table th {
-        background: #f5f5f5;
-        font-weight: bold;
-    }
-    .badge {
-        display: inline-block;
-        padding: 3px 8px;
-        border-radius: 12px;
-        font-size: 11px;
-        margin: 2px;
-    }
-    .badge-role {
-        background: #3498db;
-        color: white;
-    }
-    .badge-department {
-        background: #2ecc71;
-        color: white;
-    }
-    .btn-reset {
-        background: #e67e22;
-        color: white;
-        padding: 5px 10px;
-        border-radius: 5px;
+    .filter-btn {
+        padding: 10px 24px;
+        border-radius: 40px;
         text-decoration: none;
-        font-size: 12px;
-        margin-left: 5px;
+        background: #f0f2f5;
+        color: #2c3e50;
+        font-weight: 500;
+        transition: all 0.3s;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
     }
-    .btn-reset:hover {
-        background: #d35400;
+    .filter-btn.active {
+        background: linear-gradient(135deg, #3498db, #2980b9);
+        color: white;
+        box-shadow: 0 4px 12px rgba(52,152,219,0.3);
     }
-    .filter-form {
+    .filter-btn:hover { transform: translateY(-2px); }
+    
+    .add-card {
         background: white;
-        border-radius: 10px;
-        padding: 20px;
+        border-radius: 20px;
+        padding: 25px;
+        margin-bottom: 30px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+        border: 1px solid rgba(52,152,219,0.1);
+    }
+    .add-title {
+        font-size: 18px;
+        font-weight: 600;
+        color: #2c3e50;
         margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .add-form {
         display: flex;
         gap: 15px;
         flex-wrap: wrap;
-        align-items: end;
+        align-items: flex-end;
     }
-    .filter-form input, .filter-form select {
-        padding: 8px 12px;
-        border: 1px solid #ddd;
-        border-radius: 5px;
+    .add-form .field {
+        flex: 1;
+        min-width: 180px;
     }
-    .add-user-form {
-        background: white;
-        border-radius: 10px;
-        padding: 20px;
-        margin-bottom: 20px;
-    }
-    .form-row {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 15px;
-        margin-bottom: 15px;
-    }
-    .form-group label {
+    .add-form .field label {
         display: block;
-        margin-bottom: 5px;
-        font-weight: bold;
+        font-size: 12px;
+        color: #7f8c8d;
+        margin-bottom: 6px;
     }
-    .form-group input, .form-group select {
+    .add-form .field input, .add-form .field select {
         width: 100%;
-        padding: 8px 12px;
-        border: 1px solid #ddd;
-        border-radius: 5px;
+        padding: 12px 15px;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        font-size: 14px;
+        transition: all 0.3s;
     }
-    .btn-submit {
-        background: #27ae60;
+    .add-form .field input:focus, .add-form .field select:focus {
+        outline: none;
+        border-color: #3498db;
+        box-shadow: 0 0 0 3px rgba(52,152,219,0.1);
+    }
+    .add-btn {
+        background: linear-gradient(135deg, #27ae60, #219a52);
         color: white;
         border: none;
-        padding: 10px 20px;
-        border-radius: 5px;
+        padding: 12px 28px;
+        border-radius: 12px;
         cursor: pointer;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        transition: all 0.3s;
     }
-    .alert {
-        padding: 12px;
-        border-radius: 5px;
-        margin-bottom: 20px;
+    .add-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(39,174,96,0.3);
     }
+    
+    .users-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 20px;
+        margin-top: 20px;
+    }
+    .user-card {
+        background: white;
+        border-radius: 20px;
+        padding: 18px 15px;
+        text-align: center;
+        transition: all 0.3s;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        border: 1px solid #eef2f5;
+    }
+    .user-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 12px 24px rgba(0,0,0,0.12);
+        border-color: #3498db20;
+    }
+    .user-avatar {
+        width: 70px;
+        height: 70px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 12px;
+        font-size: 32px;
+        background: linear-gradient(135deg, #3498db20, #2980b920);
+    }
+    .user-name {
+        font-weight: 600;
+        color: #2c3e50;
+        margin-bottom: 4px;
+        font-size: 15px;
+    }
+    .user-username {
+        font-size: 12px;
+        color: #7f8c8d;
+        margin-bottom: 10px;
+    }
+    .user-roles {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 5px;
+        margin-bottom: 10px;
+    }
+    .role-badge {
+        background: #3498db20;
+        color: #3498db;
+        padding: 3px 8px;
+        border-radius: 20px;
+        font-size: 10px;
+        font-weight: 500;
+    }
+    .user-department {
+        font-size: 11px;
+        color: #7f8c8d;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+    }
+    .user-actions {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #f0f0f0;
+    }
+    .user-action {
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        transition: all 0.2s;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+    }
+    .user-action.edit { color: #f39c12; }
+    .user-action.delete { color: #e74c3c; }
+    .user-action.reset { color: #e67e22; }
+    .user-action.permission { color: #3498db; }
+    .user-action:hover { background: #f8f9fa; transform: scale(1.05); }
+    
+    .filter-bar {
+        background: white;
+        border-radius: 20px;
+        padding: 20px;
+        margin-bottom: 30px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .filter-row {
+        display: flex;
+        gap: 15px;
+        flex-wrap: wrap;
+        align-items: flex-end;
+    }
+    .filter-group {
+        flex: 1;
+        min-width: 150px;
+    }
+    .filter-group label {
+        display: block;
+        font-size: 12px;
+        color: #7f8c8d;
+        margin-bottom: 6px;
+    }
+    .filter-group input, .filter-group select {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #ddd;
+        border-radius: 12px;
+        font-size: 14px;
+    }
+    
     .alert-success {
         background: #d4edda;
         color: #155724;
+        padding: 15px;
+        border-radius: 12px;
+        margin-bottom: 20px;
     }
     .alert-danger {
         background: #f8d7da;
         color: #721c24;
+        padding: 15px;
+        border-radius: 12px;
+        margin-bottom: 20px;
+    }
+    
+    @media (max-width: 768px) {
+        .users-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+        .add-form { flex-direction: column; }
+        .add-form .field { width: 100%; }
+        .filter-row { flex-direction: column; }
+        .filter-group { width: 100%; }
     }
 </style>
 
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-    <h1>👥 مدیریت کاربران</h1>
-    <a href="dashboard.php" style="background: #95a5a6; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">بازگشت</a>
+    <h1 style="margin: 0; color: #2c3e50;">👥 مدیریت کاربران</h1>
+    <a href="dashboard.php" style="background: #95a5a6; color: white; padding: 10px 20px; border-radius: 12px; text-decoration: none;">
+        <i class="fas fa-arrow-right"></i> بازگشت
+    </a>
 </div>
 
 <?php if ($successMessage): ?>
-    <div class="alert alert-success"><?php echo $successMessage; ?></div>
+    <div class="alert-success"><?php echo $successMessage; ?></div>
 <?php endif; ?>
-
 <?php if ($errorMessage): ?>
-    <div class="alert alert-danger"><?php echo $errorMessage; ?></div>
+    <div class="alert-danger"><?php echo $errorMessage; ?></div>
+<?php endif; ?>
+<?php if ($add_error): ?>
+    <div class="alert-danger"><?php echo $add_error; ?></div>
+<?php endif; ?>
+<?php if ($add_success): ?>
+    <div class="alert-success"><?php echo $add_success; ?></div>
 <?php endif; ?>
 
 <!-- فرم افزودن کاربر جدید -->
-<div class="add-user-form">
-    <h3>➕ افزودن کاربر جدید</h3>
-    <?php if ($add_error): ?>
-        <div class="alert alert-danger"><?php echo $add_error; ?></div>
-    <?php endif; ?>
-    <?php if ($add_success): ?>
-        <div class="alert alert-success"><?php echo $add_success; ?></div>
-    <?php endif; ?>
-    <form method="POST">
-        <div class="form-row">
-            <div class="form-group">
-                <label>نام کامل *</label>
-                <input type="text" name="fullname" required>
-            </div>
-            <div class="form-group">
-                <label>ایمیل *</label>
-                <input type="email" name="email" required>
-            </div>
-            <div class="form-group">
-                <label>نام کاربری *</label>
-                <input type="text" name="username" required>
-            </div>
+<div class="add-card">
+    <div class="add-title">
+        <i class="fas fa-user-plus" style="color: #27ae60;"></i>
+        افزودن کاربر جدید
+    </div>
+    <form method="POST" class="add-form">
+        <div class="field">
+            <label>👤 نام و نام خانوادگی</label>
+            <input type="text" name="fullname" placeholder="مثال: علی محمدی" required>
         </div>
-        <div class="form-row">
-            <div class="form-group">
-                <label>رمز عبور *</label>
-                <input type="password" name="password" required>
-            </div>
-            <div class="form-group">
-                <label>نقش اصلی *</label>
-                <select name="role_id" required>
-                    <option value="">انتخاب کنید</option>
-                    <?php foreach ($roles as $role): ?>
-                        <option value="<?php echo $role['id']; ?>"><?php echo $role['name']; ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-group">
-                <label>بخش</label>
-                <select name="department_id">
-                    <option value="">بدون بخش</option>
-                    <?php foreach ($departments as $dept): ?>
-                        <option value="<?php echo $dept['id']; ?>"><?php echo $dept['name']; ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
+        <div class="field">
+            <label>🔑 نام کاربری</label>
+            <input type="text" name="username" placeholder="مثال: alimohammadi" required>
         </div>
-        <button type="submit" name="add_user" class="btn-submit">افزودن کاربر</button>
+        <div class="field">
+            <label>🔒 رمز عبور</label>
+            <input type="password" name="password" placeholder="حداقل ۶ کاراکتر" required>
+        </div>
+        <div class="field">
+            <label>⭐ نقش اصلی</label>
+            <select name="role_id" required>
+                <option value="">انتخاب کنید</option>
+                <?php foreach ($roles as $role): ?>
+                    <option value="<?php echo $role['id']; ?>"><?php echo $role['name']; ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="field">
+            <label>🏢 بخش (اختیاری)</label>
+            <select name="department_id">
+                <option value="">بدون بخش</option>
+                <?php foreach ($departments as $dept): ?>
+                    <option value="<?php echo $dept['id']; ?>"><?php echo $dept['name']; ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <button type="submit" name="add_user" class="add-btn">
+            <i class="fas fa-save"></i> افزودن کاربر
+        </button>
     </form>
 </div>
 
-<!-- فرم فیلتر -->
-<div class="filter-form">
-    <form method="GET" style="display: flex; gap: 15px; flex-wrap: wrap; width: 100%;">
-        <input type="text" name="search" placeholder="جستجو..." value="<?php echo htmlspecialchars($search); ?>" style="flex: 2;">
-        <select name="role">
-            <option value="">همه نقش‌ها</option>
-            <?php foreach ($roles as $role): ?>
-                <option value="<?php echo $role['id']; ?>" <?php echo $role_filter == $role['id'] ? 'selected' : ''; ?>><?php echo $role['name']; ?></option>
-            <?php endforeach; ?>
-        </select>
-        <select name="department">
-            <option value="">همه بخش‌ها</option>
-            <?php foreach ($departments as $dept): ?>
-                <option value="<?php echo $dept['id']; ?>" <?php echo $department_filter == $dept['id'] ? 'selected' : ''; ?>><?php echo $dept['name']; ?></option>
-            <?php endforeach; ?>
-        </select>
-        <button type="submit" style="background: #3498db; color: white; border: none; padding: 8px 20px; border-radius: 5px;">فیلتر</button>
-        <a href="users.php" style="background: #95a5a6; color: white; padding: 8px 20px; border-radius: 5px; text-decoration: none;">پاک کردن</a>
+<!-- فیلترها -->
+<div class="filter-bar">
+    <form method="GET" class="filter-row">
+        <div class="filter-group">
+            <label>🔍 جستجو</label>
+            <input type="text" name="search" placeholder="نام، نام کاربری..." value="<?php echo htmlspecialchars($search); ?>">
+        </div>
+        <div class="filter-group">
+            <label>⭐ نقش</label>
+            <select name="role">
+                <option value="">همه نقش‌ها</option>
+                <?php foreach ($roles as $role): ?>
+                    <option value="<?php echo $role['id']; ?>" <?php echo $role_filter == $role['id'] ? 'selected' : ''; ?>><?php echo $role['name']; ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>🏢 بخش</label>
+            <select name="department">
+                <option value="">همه بخش‌ها</option>
+                <?php foreach ($departments as $dept): ?>
+                    <option value="<?php echo $dept['id']; ?>" <?php echo $department_filter == $dept['id'] ? 'selected' : ''; ?>><?php echo $dept['name']; ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <button type="submit" style="background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 12px; cursor: pointer;">
+            <i class="fas fa-filter"></i> اعمال فیلتر
+        </button>
+        <a href="users.php" style="background: #95a5a6; color: white; padding: 10px 20px; border-radius: 12px; text-decoration: none;">
+            <i class="fas fa-times"></i> پاک کردن
+        </a>
     </form>
 </div>
 
-<!-- جدول کاربران -->
-<div style="background: white; border-radius: 10px; padding: 20px; overflow-x: auto;">
-    <table class="user-table">
-        <thead>
-            <tr>
-                <th>شناسه</th>
-                <th>نام و نام خانوادگی</th>
-                <th>نام کاربری</th>
-                <th>ایمیل</th>
-                <th>بخش</th>
-                <th>نقش‌ها</th>
-                <th>تاریخ ثبت</th>
-                <th>عملیات</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php if (empty($users)): ?>
-                <tr>
-                    <td colspan="8" style="text-align: center;">هیچ کاربری یافت نشد</td>
-                </tr>
-            <?php else: foreach ($users as $user): ?>
-                <tr>
-                    <td><?php echo $user['id']; ?></td>
-                    <td><?php echo htmlspecialchars($user['full_name']); ?></td>
-                    <td><?php echo htmlspecialchars($user['username']); ?></td>
-                    <td><?php echo htmlspecialchars($user['email']); ?></td>
-                    <td>
-                        <?php
-                        $deptName = '';
-                        foreach ($departments as $dept) {
-                            if ($dept['id'] == $user['department_id']) {
-                                $deptName = $dept['name'];
-                                break;
-                            }
-                        }
-                        echo $deptName ? '<span class="badge badge-department">🏢 ' . htmlspecialchars($deptName) . '</span>' : '-';
-                        ?>
-                    </td>
-                    <td>
-                        <?php
-                        $roleNames = explode(',', $user['role_names']);
-                        foreach ($roleNames as $rn) {
-                            echo '<span class="badge badge-role">' . htmlspecialchars($rn) . '</span> ';
-                        }
-                        ?>
-                    </td>
-                    <td><?php echo jdate('Y/m/d', strtotime($user['created_at'])); ?></td>
-                    <td>
-                        <a href="user-edit.php?id=<?php echo $user['id']; ?>" style="color: #f39c12; text-decoration: none; margin-left: 10px;">✏️ ویرایش</a>
-                        <?php if (isSuperAdmin() && $user['id'] != $_SESSION['user_id']): ?>
-                            <a href="?delete=<?php echo $user['id']; ?>" onclick="return confirm('آیا از حذف این کاربر اطمینان دارید؟')" style="color: #e74c3c; text-decoration: none; margin-left: 10px;">🗑️ حذف</a>
-                        <?php endif; ?>
-                        <?php if (isSuperAdmin() && $user['id'] != $_SESSION['user_id']): ?>
-                            <a href="?reset_password=<?php echo $user['id']; ?>" onclick="return confirm('رمز عبور کاربر <?php echo htmlspecialchars($user['full_name']); ?> ریست شود؟ رمز موقت 8 کاراکتری نمایش داده خواهد شد.')" class="btn-reset">🔄 ریست رمز</a>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-            <?php endforeach; endif; ?>
-        </tbody>
-    </table>
+<!-- کارت‌های کاربران -->
+<div class="users-grid">
+    <?php if (empty($users)): ?>
+        <div style="grid-column: 1/-1; text-align: center; padding: 60px; background: white; border-radius: 20px; color: #95a5a6;">
+            <i class="fas fa-users" style="font-size: 48px; margin-bottom: 15px; display: block;"></i>
+            <p>هیچ کاربری یافت نشد</p>
+        </div>
+    <?php else: foreach ($users as $user): 
+        $role_names = explode(',', $user['role_names'] ?? '');
+        $role_ids = explode(',', $user['role_ids'] ?? '');
+        $primary_role_id = $role_ids[0] ?? 0;
+        $dept_name = '';
+        foreach ($departments as $dept) {
+            if ($dept['id'] == $user['department_id']) {
+                $dept_name = $dept['name'];
+                break;
+            }
+        }
+    ?>
+    <div class="user-card">
+        <div class="user-avatar">
+            <span style="font-size: 32px;">👤</span>
+        </div>
+        <div class="user-name"><?php echo htmlspecialchars($user['full_name']); ?></div>
+        <div class="user-username"><?php echo htmlspecialchars($user['username']); ?></div>
+        <div class="user-roles">
+            <?php foreach ($role_names as $rn): 
+                if (trim($rn)): ?>
+                    <span class="role-badge"><?php echo htmlspecialchars(trim($rn)); ?></span>
+                <?php endif; 
+            endforeach; ?>
+        </div>
+        <?php if ($dept_name): ?>
+            <div class="user-department">
+                <i class="fas fa-building"></i> <?php echo htmlspecialchars($dept_name); ?>
+            </div>
+        <?php endif; ?>
+        <div class="user-actions">
+            <a href="user-edit.php?id=<?php echo $user['id']; ?>" class="user-action edit" title="ویرایش">
+                <i class="fas fa-edit"></i>
+            </a>
+            <a href="role-permissions.php?id=<?php echo $primary_role_id; ?>" class="user-action permission" title="دسترسی‌های نقش">
+                🔐
+            </a>
+            <?php if (isSuperAdmin() && $user['id'] != $_SESSION['user_id']): ?>
+                <a href="?delete=<?php echo $user['id']; ?>" class="user-action delete" title="حذف" onclick="return confirm('آیا از حذف این کاربر اطمینان دارید؟')">
+                    <i class="fas fa-trash-alt"></i>
+                </a>
+                <a href="?reset_password=<?php echo $user['id']; ?>" class="user-action reset" title="ریست رمز" onclick="return confirm('رمز عبور کاربر <?php echo htmlspecialchars($user['full_name']); ?> ریست شود؟')">
+                    🔓
+                </a>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endforeach; endif; ?>
 </div>
 
 <?php
