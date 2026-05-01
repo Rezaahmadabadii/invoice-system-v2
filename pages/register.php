@@ -42,33 +42,44 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
     } elseif (strlen($password) < 6) {
         $error = 'رمز عبور باید حداقل ۶ کاراکتر باشد';
     } else {
+        // بررسی تکراری نبودن نام کاربری و ایمیل
         $check = $pdo->prepare("SELECT id FROM users WHERE username = ? OR email = ?");
         $check->execute([$username, $email]);
         if ($check->rowCount() > 0) {
             $error = 'این نام کاربری یا ایمیل قبلاً ثبت شده است';
         } else {
-            $hashed = password_hash($password, PASSWORD_DEFAULT);
-            $insert = $pdo->prepare("INSERT INTO users (username, email, full_name, password) VALUES (?, ?, ?, ?)");
-            if ($insert->execute([$username, $email, $fullname, $hashed])) {
-                $user_id = $pdo->lastInsertId();
-                // نقش اصلی کاربر = همان بخش انتخابی
-                $role_stmt = $pdo->prepare("INSERT INTO user_roles (user_id, role_id, assigned_by) VALUES (?, ?, ?)");
-                $role_stmt->execute([$user_id, $department_id, $user_id]);
-
-                // اگر اولین کاربر است، نقش super_admin را هم اضافه کن
-                $user_count = $pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
-                if ($user_count == 1) {
-                    $super_admin_role = $pdo->query("SELECT id FROM roles WHERE name = 'super_admin'")->fetchColumn();
-                    if ($super_admin_role) {
-                        $role_stmt->execute([$user_id, $super_admin_role, $user_id]);
-                    }
-                }
-
-                $success = 'ثبت نام با موفقیت انجام شد. اکنون می‌توانید وارد شوید.';
-                header('refresh:2;url=login.php');
-                exit;
+            // بررسی معتبر بودن department_id
+            $checkDept = $pdo->prepare("SELECT id FROM roles WHERE id = ? AND is_department = 1");
+            $checkDept->execute([$department_id]);
+            if ($checkDept->rowCount() == 0) {
+                $error = 'بخش انتخاب شده معتبر نیست';
             } else {
-                $error = 'خطا در ثبت نام';
+                $hashed = password_hash($password, PASSWORD_DEFAULT);
+                
+                // ذخیره کاربر با department_id
+                $insert = $pdo->prepare("INSERT INTO users (username, email, full_name, password, department_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
+                if ($insert->execute([$username, $email, $fullname, $hashed, $department_id])) {
+                    $user_id = $pdo->lastInsertId();
+                    
+                    // نقش اصلی کاربر = همان بخش انتخابی
+                    $role_stmt = $pdo->prepare("INSERT INTO user_roles (user_id, role_id, assigned_by) VALUES (?, ?, ?)");
+                    $role_stmt->execute([$user_id, $department_id, $user_id]);
+
+                    // اگر اولین کاربر است، نقش super_admin را هم اضافه کن
+                    $user_count = $pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
+                    if ($user_count == 1) {
+                        $super_admin_role = $pdo->query("SELECT id FROM roles WHERE name = 'super_admin'")->fetchColumn();
+                        if ($super_admin_role) {
+                            $role_stmt->execute([$user_id, $super_admin_role, $user_id]);
+                        }
+                    }
+
+                    $success = 'ثبت نام با موفقیت انجام شد. اکنون می‌توانید وارد شوید.';
+                    header('refresh:2;url=login.php');
+                    exit;
+                } else {
+                    $error = 'خطا در ثبت نام';
+                }
             }
         }
     }

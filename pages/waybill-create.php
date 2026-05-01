@@ -176,6 +176,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
 	if (!empty($errors)) {
 		$error = implode('<br>', $errors);
 	}
+}
+
+$page_title = 'ایجاد بارنامه جدید';
+ob_start();
+?>
 
 <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
 <style>

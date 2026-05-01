@@ -41,6 +41,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['username'] = $user['username'];
             $_SESSION['user_fullname'] = $user['full_name'];
+            $_SESSION['user_department_id'] = $user['department_id'] ?? null;
             $_SESSION['user_roles'] = array_column($roles, 'name');
             $_SESSION['user_role_ids'] = array_column($roles, 'id');
             $_SESSION['is_super_admin'] = in_array('super_admin', $_SESSION['user_roles']);
@@ -63,7 +64,7 @@ ob_start();
 
     <div class="login-box">
         <div class="auth-panels" id="authPanels">
-            <!-- پنل ورود -->
+            <!-- فقط پنل ورود - پنل ثبت نام حذف شد -->
             <div class="panel panel-login">
                 <h2>ورود</h2>
                 
@@ -81,115 +82,26 @@ ob_start();
                     <div class="input-group">
                         <div class="input-wrap">
                             <input type="password" name="password" placeholder="رمز عبور" required>
-                            <span class="input-icon toggle-password" data-target="loginPassword"><i class="fa-solid fa-lock"></i></span>
+                            <span class="input-icon toggle-password"><i class="fa-solid fa-lock"></i></span>
                         </div>
                     </div>
                     <div class="forgot-password">
-                        <a href="#">رمز عبور را فراموش کرده‌اید؟</a>
+                        <a href="/invoice-system-v2/pages/forgot-password.php">رمز عبور را فراموش کرده‌اید؟</a>
                     </div>
                     <button type="submit" name="login" class="login-btn">ورود</button>
                 </form>
                 
-                <div class="social-login">
-                    <p>ورود با</p>
-                    <div class="social-icons">
-                        <div class="social-icon facebook">f</div>
-                        <div class="social-icon twitter">𝕏</div>
-                        <div class="social-icon google">G</div>
-                    </div>
-                </div>
-                <div class="signup-link">
-                    <a href="#" id="goSignup">ثبت‌نام</a>
-                </div>
-            </div>
-
-            <!-- پنل ثبت‌نام (همون صفحه register.php رو صدا می‌زنه) -->
-            <div class="panel panel-signup">
-                <h2>ثبت‌نام</h2>
-                <form method="POST" action="register.php">
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="text" name="fullname" placeholder="نام و نام خانوادگی" required>
-                            <span class="input-icon"><i class="fa-solid fa-user"></i></span>
-                        </div>
-                    </div>
-                    
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="email" name="email" placeholder="ایمیل" required>
-                            <span class="input-icon"><i class="fa-solid fa-envelope"></i></span>
-                        </div>
-                    </div>
-                    
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="text" name="username" placeholder="نام کاربری" required>
-                            <span class="input-icon"><i class="fa-solid fa-user-tag"></i></span>
-                        </div>
-                    </div>
-                    
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="text" name="phone" placeholder="شماره تماس">
-                            <span class="input-icon"><i class="fa-solid fa-phone"></i></span>
-                        </div>
-                    </div>
-                    
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="text" name="position" placeholder="سمت سازمانی">
-                            <span class="input-icon"><i class="fa-solid fa-briefcase"></i></span>
-                        </div>
-                    </div>
-                    
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="password" name="password" placeholder="رمز عبور" required>
-                            <span class="input-icon toggle-password" data-target="signupPassword"><i class="fa-solid fa-lock"></i></span>
-                        </div>
-                    </div>
-                    
-                    <div class="input-group">
-                        <div class="input-wrap">
-                            <input type="password" name="confirm_password" placeholder="تکرار رمز عبور" required>
-                            <span class="input-icon"><i class="fa-solid fa-lock"></i></span>
-                        </div>
-                    </div>
-                    
-                    <button type="submit" name="register" class="login-btn">ثبت‌نام</button>
-                </form>
+                <!-- بخش ورود با شبکه‌های اجتماعی - حذف شد -->
                 
-                <div class="social-login">
-                    <p>ثبت‌نام با</p>
-                    <div class="social-icons">
-                        <div class="social-icon facebook">f</div>
-                        <div class="social-icon twitter">𝕏</div>
-                        <div class="social-icon google">G</div>
-                    </div>
-                </div>
                 <div class="signup-link">
-                    <a href="#" id="goLogin">بازگشت به صفحه ورود</a>
+                    <a href="register.php">ثبت‌نام</a>
                 </div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- اسکریپت‌ها (همون قبلی) -->
 <script>
-    const authPanels = document.getElementById('authPanels');
-    const goSignup = document.getElementById('goSignup');
-    const goLogin = document.getElementById('goLogin');
-
-    goSignup?.addEventListener('click', (e) => {
-        e.preventDefault();
-        authPanels.classList.add('show-signup');
-    });
-    goLogin?.addEventListener('click', (e) => {
-        e.preventDefault();
-        authPanels.classList.remove('show-signup');
-    });
-
     document.querySelectorAll('.toggle-password').forEach(el => {
         el.addEventListener('click', function() {
             const input = this.closest('.input-wrap').querySelector('input');
@@ -198,7 +110,6 @@ ob_start();
         });
     });
 
-    // دایره‌های متحرک
     const circleContainer = document.getElementById('circleContainer');
     if (circleContainer) {
         const numBars = 50;

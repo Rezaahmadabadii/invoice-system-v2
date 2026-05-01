@@ -25,7 +25,6 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// دریافت اطلاعات بارنامه
 $stmt = $pdo->prepare("
     SELECT d.*, c.name as company_name, v.name as vendor_name
     FROM documents d
@@ -41,8 +40,8 @@ if (!$waybill) {
     exit;
 }
 
-// بررسی دسترسی: فقط ایجادکننده و در وضعیت‌های قابل ویرایش
-$can_edit = ($waybill['created_by'] == $_SESSION['user_id']) && in_array($waybill['status'], ['draft', 'pending']);
+// فقط بررسی ایجادکننده (بدون شرط وضعیت) - اصلاح شده
+$can_edit = ($waybill['created_by'] == $_SESSION['user_id']);
 if (!$can_edit) {
     $_SESSION['error'] = 'شما مجاز به ویرایش این بارنامه نیستید.';
     header('Location: waybill-view.php?id=' . $id);
@@ -89,7 +88,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_waybill'])) {
     if (empty($discharge_destination)) $errors[] = 'مقصد تخلیه الزامی است';
     
     if (empty($errors)) {
-        // به‌روزرسانی اطلاعات
         $update = $pdo->prepare("
             UPDATE documents SET 
                 title = ?,

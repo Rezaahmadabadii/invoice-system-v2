@@ -19,8 +19,8 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// دریافت لیست‌های مورد نیاز
-$companies = $pdo->query("SELECT id, name FROM companies ORDER BY name")->fetchAll();
+// دریافت لیست‌های مورد نیاز (با short_name)
+$companies = $pdo->query("SELECT id, name, short_name FROM companies ORDER BY name")->fetchAll();
 $vendors = $pdo->query("SELECT id, name, contract_number FROM vendors ORDER BY name")->fetchAll();
 $workshops = $pdo->query("SELECT id, name FROM workshops ORDER BY name")->fetchAll();
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
@@ -75,10 +75,19 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_invoice'])) {
         }
     }
     
-    // بررسی تکراری بودن شماره فاکتور
+    // بررسی تکراری بودن شماره فاکتور (با در نظر گرفتن مخفف شرکت)
+    // ابتدا مخفف شرکت را دریافت کنیم
+    $companyInfo = $pdo->prepare("SELECT short_name FROM companies WHERE id = ?");
+    $companyInfo->execute([$company_id]);
+    $companyData = $companyInfo->fetch();
+    $short_name = $companyData['short_name'] ?? '';
+    
+    // شماره فاکتور نهایی با مخفف شرکت
+    $final_invoice_number = !empty($short_name) ? $short_name . '-' . $invoice_number : $invoice_number;
+    
     if (empty($errors) || $force_save) {
         $check = $pdo->prepare("SELECT id FROM documents WHERE document_number = ? AND type = 'invoice'");
-        $check->execute([$invoice_number]);
+        $check->execute([$final_invoice_number]);
         $existing = $check->fetch();
         if ($existing && !$force_save) {
             $duplicate_warning = 'این شماره فاکتور قبلاً ثبت شده است. آیا مطمئن هستید؟';
@@ -90,11 +99,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_invoice'])) {
         $upload_dir = __DIR__ . '/../uploads/invoices/';
         if (!file_exists($upload_dir)) mkdir($upload_dir, 0777, true);
         $file_ext = pathinfo($_FILES['invoice_file']['name'], PATHINFO_EXTENSION);
-        $file_name = time() . '_' . $invoice_number . '.' . $file_ext;
+        
+        // نام فایل جدید با مخفف شرکت و شماره فاکتور
+        $file_name = $final_invoice_number . '.' . $file_ext;
         $file_path = 'uploads/invoices/' . $file_name;
         
         if (move_uploaded_file($_FILES['invoice_file']['tmp_name'], $upload_dir . $file_name)) {
-            $doc_number = 'INV-' . date('Ymd') . '-' . rand(100, 999);
+            // شماره سند داخلی (برای سیستم) - می‌تواند همان final_invoice_number باشد
+            $doc_number = $final_invoice_number;
             
             // محاسبه مبلغ نهایی
             $amount_clean = floatval(str_replace(',', '', $amount));
@@ -104,7 +116,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_invoice'])) {
                 $final_amount = $final_amount + ($amount_clean * 0.1);
             }
             
-            // مهم: فیلد department_id حذف شده است (در دیتابیس شما NOT NULL است)
             $data = [
                 'document_number' => $doc_number,
                 'type' => 'invoice',
@@ -115,7 +126,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_invoice'])) {
                 'company_id' => $company_id,
                 'workshop_id' => $workshop_id ?: null,
                 'vendor_id' => $vendor_id ?: null,
-				'department_id' => 1,
+                'department_id' => 1,
                 'document_date' => $invoice_date,
                 'status' => 'forwarded',
                 'contract_number' => $contract_number ?: null,
@@ -138,7 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_invoice'])) {
                 $forward_stmt = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action) VALUES (?, ?, ?, ?, 'forward')");
                 $forward_stmt->execute([$doc_id, $_SESSION['user_id'], $forward_to_department ?: null, $forward_to_user ?: null]);
                 logActivity($_SESSION['user_id'], 'create_invoice', "فاکتور جدید: $invoice_number", $doc_id);
-                $success = 'فاکتور با موفقیت ثبت و ارسال شد. شماره پیگیری: ' . $doc_number;
+                $success = 'فاکتور با موفقیت ثبت و ارسال شد. شماره فاکتور: ' . $final_invoice_number;
             } else {
                 $errors[] = 'خطا در ثبت فاکتور';
             }
@@ -225,6 +236,13 @@ ob_start();
         from { transform: translateX(100%); opacity: 0; }
         to { transform: translateX(0); opacity: 1; }
     }
+    
+    /* استایل برای نمایش مخفف شرکت در انتخاب */
+    .company-short-name {
+        font-size: 11px;
+        color: #7f8c8d;
+        margin-right: 5px;
+    }
 </style>
 
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
@@ -269,7 +287,8 @@ ob_start();
         <div class="row-3col">
             <div class="form-group">
                 <label>شماره فاکتور <span style="color: red;">*</span></label>
-                <input type="text" name="invoice_number" required value="<?php echo htmlspecialchars($_POST['invoice_number'] ?? ''); ?>">
+                <input type="text" name="invoice_number" required placeholder="مثال: 1234" value="<?php echo htmlspecialchars($_POST['invoice_number'] ?? ''); ?>">
+                <small>شماره فاکتور به صورت خودکار با مخفف شرکت ترکیب می‌شود (مثال: kyhn-1234)</small>
             </div>
             <div class="form-group">
                 <label>تاریخ فاکتور (شمسی) <span style="color: red;">*</span></label>
@@ -290,9 +309,15 @@ ob_start();
                 <select name="company_id" required>
                     <option value="">انتخاب کنید</option>
                     <?php foreach ($companies as $comp): ?>
-                        <option value="<?php echo $comp['id']; ?>" <?php echo ($_POST['company_id'] ?? '') == $comp['id'] ? 'selected' : ''; ?>><?php echo $comp['name']; ?></option>
+                        <option value="<?php echo $comp['id']; ?>" data-short="<?php echo $comp['short_name']; ?>" <?php echo ($_POST['company_id'] ?? '') == $comp['id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($comp['name']); ?>
+                            <?php if ($comp['short_name']): ?>
+                                <span class="company-short-name">(مخفف: <?php echo htmlspecialchars($comp['short_name']); ?>)</span>
+                            <?php endif; ?>
+                        </option>
                     <?php endforeach; ?>
                 </select>
+                <small>مخفف شرکت در شماره فاکتور استفاده می‌شود</small>
             </div>
             <div class="form-group">
                 <label>کارگاه/بخش پروژه</label>

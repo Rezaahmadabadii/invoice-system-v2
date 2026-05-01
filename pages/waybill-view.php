@@ -9,7 +9,7 @@ if (!isset($_SESSION['user_id'])) {
 
 $id = $_GET['id'] ?? 0;
 if (!$id) {
-    header('Location: inbox.php');
+    header('Location: waybills.php');
     exit;
 }
 
@@ -39,41 +39,29 @@ $stmt = $pdo->prepare("
     LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
     LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
     LEFT JOIN users creator ON d.created_by = creator.id
-    WHERE d.id = ? AND d.type = 'invoice'
+    WHERE d.id = ? AND d.type = 'waybill'
 ");
 $stmt->execute([$id]);
-$invoice = $stmt->fetch();
+$waybill = $stmt->fetch();
 
-if (!$invoice) {
-    header('Location: inbox.php');
+if (!$waybill) {
+    header('Location: waybills.php');
     exit;
 }
 
 $user_id = $_SESSION['user_id'];
 $user_roles = $_SESSION['user_roles'] ?? [];
-$is_creator = ($invoice['created_by'] == $user_id);
-$is_holder_user = ($invoice['current_holder_user_id'] == $user_id);
-$is_holder_department = ($invoice['current_holder_department_id'] && in_array($invoice['current_holder_department_id'], $_SESSION['user_role_ids'] ?? []));
+$is_creator = ($waybill['created_by'] == $user_id);
+$is_holder_user = ($waybill['current_holder_user_id'] == $user_id);
+$is_holder_department = ($waybill['current_holder_department_id'] && in_array($waybill['current_holder_department_id'], $_SESSION['user_role_ids'] ?? []));
 $is_holder = $is_holder_user || $is_holder_department;
 $is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 
-// بررسی وجود اقدام در تاریخچه
-$action_stmt = $pdo->prepare("SELECT COUNT(*) FROM forwarding_history WHERE document_id = ?");
-$action_stmt->execute([$id]);
-$action_count = $action_stmt->fetchColumn();
-
-// شرایط ویرایش و حذف
-$can_edit_delete = false;
-if ($is_creator && $action_count == 0) {
-    $can_edit_delete = true;
-}
-if ($is_admin) {
-    $can_edit_delete = true;
-}
-
-// قوانین اقدامات
-$can_forward = $is_holder && !in_array($invoice['status'], ['approved', 'rejected', 'completed']);
-$can_approve_reject = ($is_creator || $is_admin) && !in_array($invoice['status'], ['approved', 'rejected', 'completed']);
+// قوانین جدید:
+// - ارجاع: فقط گیرنده فعلی می‌تواند (اگر بارنامه تایید/رد نشده باشد)
+$can_forward = $is_holder && !in_array($waybill['status'], ['approved', 'rejected']);
+// - تایید/رد: فقط ایجادکننده یا ادمین
+$can_approve_reject = ($is_creator || $is_admin) && !in_array($waybill['status'], ['approved', 'rejected']);
 
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
 $users = $pdo->query("SELECT id, full_name, username FROM users ORDER BY full_name")->fetchAll();
@@ -104,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     
     if ($action == 'forward') {
         if (!$can_forward) {
-            $error = 'شما مجاز به ارجاع این فاکتور نیستید.';
+            $error = 'شما مجاز به ارجاع این بارنامه نیستید.';
         } elseif (empty($to_department) && empty($to_user)) {
             $error = 'لطفاً بخش یا شخص مقصد را انتخاب کنید';
         } elseif (empty($notes)) {
@@ -114,21 +102,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             $update->execute([$to_department ?: null, $to_user ?: null, $id]);
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) VALUES (?, ?, ?, ?, 'forward', ?)");
             $insert->execute([$id, $_SESSION['user_id'], $to_department ?: null, $to_user ?: null, $notes]);
-            $success = 'فاکتور با موفقیت ارجاع شد.';
+            $success = 'بارنامه با موفقیت ارجاع شد.';
         }
     } elseif ($action == 'approve') {
         if (!$can_approve_reject) {
-            $error = 'شما مجاز به تایید این فاکتور نیستید.';
+            $error = 'شما مجاز به تایید این بارنامه نیستید.';
         } else {
             $update = $pdo->prepare("UPDATE documents SET status = 'approved' WHERE id = ?");
             $update->execute([$id]);
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'approve', ?)");
             $insert->execute([$id, $_SESSION['user_id'], $notes]);
-            $success = 'فاکتور با موفقیت تایید نهایی شد.';
+            $success = 'بارنامه با موفقیت تایید نهایی شد.';
         }
     } elseif ($action == 'reject') {
         if (!$can_approve_reject) {
-            $error = 'شما مجاز به رد این فاکتور نیستید.';
+            $error = 'شما مجاز به رد این بارنامه نیستید.';
         } elseif (empty($notes)) {
             $error = 'لطفاً دلیل رد را وارد کنید';
         } else {
@@ -136,14 +124,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             $update->execute([$notes, $id]);
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'reject', ?)");
             $insert->execute([$id, $_SESSION['user_id'], $notes]);
-            $success = 'فاکتور رد شد.';
+            $success = 'بارنامه رد شد.';
         }
     } else {
         $error = 'اقدام نامعتبر است.';
     }
 }
 
-$page_title = 'مشاهده فاکتور';
+$page_title = 'مشاهده بارنامه';
 ob_start();
 ?>
 
@@ -157,8 +145,6 @@ ob_start();
     .status-forwarded { background: #fff3cd; color: #f39c12; }
     .status-approved { background: #d4edda; color: #2ecc71; }
     .status-rejected { background: #f8d7da; color: #e74c3c; }
-    .status-viewed { background: #e8f4fd; color: #3498db; }
-    .status-under_review { background: #fef5e8; color: #f39c12; }
     .holder-box { background: #f0f7ff; border-radius: 12px; padding: 16px; margin-bottom: 24px; border-right: 4px solid #3498db; }
     .action-form { background: white; border-radius: 16px; padding: 24px; margin-bottom: 24px; border: 1px solid #e9ecef; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .action-form h3 { margin-bottom: 20px; color: #2c3e50; font-size: 18px; }
@@ -166,31 +152,28 @@ ob_start();
     .form-group label { display: block; margin-bottom: 8px; font-weight: 500; color: #2c3e50; font-size: 13px; }
     .form-group label .required-star { color: #e74c3c; margin-right: 3px; }
     .form-group select, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 10px; font-size: 14px; transition: all 0.3s; }
+    .form-group select:focus, .form-group textarea:focus { outline: none; border-color: #3498db; box-shadow: 0 0 0 3px rgba(52,152,219,0.1); }
     .btn-submit { background: #27ae60; color: white; border: none; padding: 12px 24px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.3s; }
+    .btn-submit:hover { background: #219a52; transform: translateY(-2px); }
+    .btn-approve { background: #2ecc71; }
+    .btn-approve:hover { background: #27ae60; }
+    .btn-reject { background: #e74c3c; }
+    .btn-reject:hover { background: #c0392b; }
     .alert-error { background: #f8d7da; color: #721c24; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     .alert-success { background: #d4edda; color: #155724; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     .history-table { width: 100%; border-collapse: collapse; }
     .history-table th, .history-table td { padding: 12px; text-align: right; border-bottom: 1px solid #eee; }
     .history-table th { background: #f8f9fa; font-weight: 600; }
+    .info-note { background: #fef9e6; border-radius: 12px; padding: 16px; margin-bottom: 24px; text-align: center; color: #d4a017; }
     .row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
     hr { margin: 20px 0; border: none; border-top: 1px solid #eee; }
 </style>
 
 <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
-    <h1 style="margin: 0;">🧾 مشاهده فاکتور <?php echo htmlspecialchars($invoice['document_number']); ?></h1>
-    <div style="display: flex; gap: 10px;">
-        <?php if ($can_edit_delete): ?>
-            <a href="invoice-edit.php?id=<?php echo $invoice['id']; ?>" style="background: #f39c12; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none;">
-                <i class="fas fa-edit"></i> ویرایش
-            </a>
-            <a href="invoice-delete.php?id=<?php echo $invoice['id']; ?>" style="background: #e74c3c; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none;" onclick="return confirm('حذف شود؟')">
-                <i class="fas fa-trash-alt"></i> حذف
-            </a>
-        <?php endif; ?>
-        <a href="inbox.php" style="background: #95a5a6; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none;">
-            <i class="fas fa-arrow-right"></i> بازگشت
-        </a>
-    </div>
+    <h1 style="margin: 0;">🚛 مشاهده بارنامه <?php echo htmlspecialchars($waybill['document_number']); ?></h1>
+    <a href="waybills.php" style="background: #95a5a6; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none; font-size: 14px;">
+        <i class="fas fa-arrow-right"></i> بازگشت
+    </a>
 </div>
 
 <?php if ($error): ?>
@@ -202,73 +185,73 @@ ob_start();
 
 <div class="info-card">
     <div class="info-grid">
-        <div class="info-item"><small>شماره فاکتور</small><strong><?php echo htmlspecialchars($invoice['document_number']); ?></strong></div>
-        <div class="info-item"><small>عنوان</small><strong><?php echo htmlspecialchars($invoice['title']); ?></strong></div>
-        <div class="info-item"><small>شرکت</small><strong><?php echo htmlspecialchars($invoice['company_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>فروشنده</small><strong><?php echo htmlspecialchars($invoice['vendor_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>مبلغ</small><strong><?php echo number_format($invoice['amount']); ?> تومان</strong></div>
-        <div class="info-item"><small>تاریخ فاکتور</small><strong><?php echo htmlspecialchars($invoice['document_date']); ?></strong></div>
-        <div class="info-item"><small>تاریخ ثبت</small><strong><?php echo jdate('Y/m/d', strtotime($invoice['created_at'])); ?></strong></div>
+        <div class="info-item"><small>شماره بارنامه</small><strong><?php echo htmlspecialchars($waybill['document_number']); ?></strong></div>
+        <div class="info-item"><small>عنوان</small><strong><?php echo htmlspecialchars($waybill['title']); ?></strong></div>
+        <div class="info-item"><small>شرکت</small><strong><?php echo htmlspecialchars($waybill['company_name'] ?? '-'); ?></strong></div>
+        <div class="info-item"><small>فروشنده</small><strong><?php echo htmlspecialchars($waybill['vendor_name'] ?? '-'); ?></strong></div>
+        <div class="info-item"><small>مبلغ</small><strong><?php echo number_format($waybill['amount'] ?? 0); ?> تومان</strong></div>
+        <div class="info-item"><small>فرستنده</small><strong><?php echo htmlspecialchars($waybill['sender_name'] ?? '-'); ?></strong></div>
+        <div class="info-item"><small>گیرنده</small><strong><?php echo htmlspecialchars($waybill['receiver_name'] ?? '-'); ?></strong></div>
         <div class="info-item"><small>وضعیت</small>
             <strong>
                 <?php
-                $status_class = 'status-' . ($invoice['status'] ?? 'pending');
+                $status_class = 'status-' . ($waybill['status'] ?? 'pending');
                 $status_texts = [
-                    'draft' => '📝 پیش‌نویس',
-                    'pending' => '⏳ در انتظار',
-                    'forwarded' => '📨 ارسال شده',
-                    'viewed' => '👁️ مشاهده شده',
-                    'under_review' => '🔍 در حال بررسی',
-                    'approved' => '✅ تایید شده',
-                    'rejected' => '❌ رد شده',
-                    'completed' => '✔️ بسته شده'
+                    'pending' => 'در انتظار اقدام',
+                    'forwarded' => 'ارسال شده',
+                    'approved' => 'تایید شده',
+                    'rejected' => 'رد شده'
                 ];
-                $status_text = $status_texts[$invoice['status']] ?? $invoice['status'];
+                $status_text = $status_texts[$waybill['status']] ?? $waybill['status'];
                 echo '<span class="status-badge ' . $status_class . '">' . $status_text . '</span>';
                 ?>
             </strong>
         </div>
     </div>
-    <?php if ($invoice['description']): ?>
-        <div style="margin-top: 15px;"><small>توضیحات</small><div><?php echo nl2br(htmlspecialchars($invoice['description'])); ?></div></div>
-    <?php endif; ?>
-    <?php if ($invoice['file_path']): ?>
-        <div style="margin-top: 15px;"><small>فایل ضمیمه</small><div><a href="/invoice-system-v2/<?php echo $invoice['file_path']; ?>" target="_blank">📎 دانلود فایل</a></div></div>
+    <div class="info-grid" style="margin-top:15px;">
+        <div class="info-item"><small>مبدا بارگیری</small><strong><?php echo htmlspecialchars($waybill['loading_origin'] ?? '-'); ?></strong></div>
+        <div class="info-item"><small>مقصد تخلیه</small><strong><?php echo htmlspecialchars($waybill['discharge_destination'] ?? '-'); ?></strong></div>
+        <div class="info-item"><small>راننده اول</small><strong><?php echo htmlspecialchars($waybill['driver1_name'] ?? '-'); ?></strong></div>
+        <div class="info-item"><small>شماره پلاک</small><strong><?php echo htmlspecialchars($waybill['vehicle_plate'] ?? '-'); ?></strong></div>
+    </div>
+    <?php if ($waybill['description']): ?>
+        <div style="margin-top: 15px;"><small>توضیحات</small><div><?php echo nl2br(htmlspecialchars($waybill['description'])); ?></div></div>
     <?php endif; ?>
 </div>
 
 <div class="holder-box">
     <i class="fas fa-user-check" style="color: #3498db; margin-left: 10px;"></i>
-    <strong>📍 در دست:</strong> 
-    <?php if ($invoice['holder_user_name']): ?>
-        👤 <?php echo htmlspecialchars($invoice['holder_user_name']); ?>
-    <?php elseif ($invoice['holder_department_name']): ?>
-        🏢 <?php echo htmlspecialchars($invoice['holder_department_name']); ?>
+    <strong>در دست:</strong> 
+    <?php if ($waybill['holder_user_name']): ?>
+        <?php echo htmlspecialchars($waybill['holder_user_name']); ?>
+    <?php elseif ($waybill['holder_department_name']): ?>
+        <?php echo htmlspecialchars($waybill['holder_department_name']); ?> (بخش)
     <?php else: ?>
         هیچ
     <?php endif; ?>
 </div>
 
+<!-- فرم اقدامات (کشویی انتخابی) -->
 <?php if ($can_forward || $can_approve_reject): ?>
 <div class="action-form">
-    <h3><i class="fas fa-bolt" style="color: #f39c12;"></i> اقدامات روی فاکتور</h3>
+    <h3><i class="fas fa-bolt" style="color: #f39c12;"></i> اقدامات روی بارنامه</h3>
     <form method="POST" id="actionForm">
         <div class="form-group">
             <label>انتخاب اقدام <span class="required-star">*</span></label>
             <select name="action" id="actionSelect" required>
                 <option value="">--- انتخاب کنید ---</option>
                 <?php if ($can_forward): ?>
-                    <option value="forward">📨 بررسی و پیگیری</option>
+                    <option value="forward">🔍 بررسی و پیگیری</option>
                 <?php endif; ?>
                 <?php if ($can_approve_reject): ?>
                     <option value="approve">✅ تایید نهایی</option>
-                    <option value="reject">❌ رد فاکتور</option>
+                    <option value="reject">❌ رد بارنامه</option>
                 <?php endif; ?>
             </select>
         </div>
         
+        <!-- فیلدهای ارجاع (برای گزینه بررسی و پیگیری) -->
         <div id="forwardFields" style="display: none;">
-            <hr>
             <div class="row-2col">
                 <div class="form-group">
                     <label>📋 ارجاع به بخش</label>
@@ -291,8 +274,9 @@ ob_start();
             </div>
         </div>
         
+        <!-- فیلد توضیحات (همیشه نمایش داده می‌شود) -->
         <div class="form-group">
-            <label>توضیحات <span id="notesRequiredStar" class="required-star" style="display: none;">*</span></label>
+            <label>توضیحات <span id="notesRequiredStar" class="required-star">*</span></label>
             <textarea name="notes" id="actionNotes" rows="2" placeholder="توضیحات خود را وارد کنید..."></textarea>
         </div>
         
@@ -303,90 +287,113 @@ ob_start();
 </div>
 
 <script>
-    const actionSelect = document.getElementById('actionSelect');
-    const forwardFields = document.getElementById('forwardFields');
-    const actionNotes = document.getElementById('actionNotes');
-    const notesRequiredStar = document.getElementById('notesRequiredStar');
+const actionSelect = document.getElementById('actionSelect');
+const forwardFields = document.getElementById('forwardFields');
+const actionNotes = document.getElementById('actionNotes');
+const notesRequiredStar = document.getElementById('notesRequiredStar');
+const submitBtn = document.getElementById('submitBtn');
+
+function toggleFields() {
+    const selectedValue = actionSelect.value;
     
-    function toggleFields() {
-        const selectedValue = actionSelect.value;
+    // مخفی کردن فیلدهای ارجاع
+    forwardFields.style.display = 'none';
+    
+    if (selectedValue === 'forward') {
+        forwardFields.style.display = 'block';
+        actionNotes.required = true;
+        notesRequiredStar.style.display = 'inline';
+        actionNotes.placeholder = 'لطفاً دلیل بررسی و پیگیری را وارد کنید...';
+    } else if (selectedValue === 'reject') {
         forwardFields.style.display = 'none';
-        
-        if (selectedValue === 'forward') {
-            forwardFields.style.display = 'block';
-            actionNotes.required = true;
-            notesRequiredStar.style.display = 'inline';
-            actionNotes.placeholder = 'لطفاً دلیل بررسی و پیگیری را وارد کنید...';
-        } else if (selectedValue === 'reject') {
-            forwardFields.style.display = 'none';
-            actionNotes.required = true;
-            notesRequiredStar.style.display = 'inline';
-            actionNotes.placeholder = 'لطفاً دلیل رد را وارد کنید...';
-        } else if (selectedValue === 'approve') {
-            forwardFields.style.display = 'none';
-            actionNotes.required = false;
-            notesRequiredStar.style.display = 'none';
-            actionNotes.placeholder = '(اختیاری) توضیحات...';
-        } else {
-            actionNotes.required = false;
-            notesRequiredStar.style.display = 'none';
+        actionNotes.required = true;
+        notesRequiredStar.style.display = 'inline';
+        actionNotes.placeholder = 'لطفاً دلیل رد را وارد کنید...';
+    } else if (selectedValue === 'approve') {
+        forwardFields.style.display = 'none';
+        actionNotes.required = false;
+        notesRequiredStar.style.display = 'none';
+        actionNotes.placeholder = '(اختیاری) توضیحات...';
+    } else {
+        actionNotes.required = false;
+        notesRequiredStar.style.display = 'none';
+    }
+}
+
+actionSelect.addEventListener('change', toggleFields);
+
+// اعتبارسنجی قبل از ارسال
+submitBtn.addEventListener('click', function(e) {
+    const selectedValue = actionSelect.value;
+    
+    if (selectedValue === '') {
+        e.preventDefault();
+        alert('لطفاً یک اقدام را انتخاب کنید');
+        return false;
+    }
+    
+    if (selectedValue === 'forward') {
+        const dept = document.querySelector('select[name="to_department"]').value;
+        const user = document.querySelector('select[name="to_user"]').value;
+        if (dept === '' && user === '') {
+            e.preventDefault();
+            alert('لطفاً بخش یا شخص مقصد را انتخاب کنید');
+            return false;
         }
     }
     
-    actionSelect.addEventListener('change', toggleFields);
-    
-    document.getElementById('submitBtn').addEventListener('click', function(e) {
-        const selectedValue = actionSelect.value;
-        
-        if (selectedValue === '') {
-            e.preventDefault();
-            alert('لطفاً یک اقدام را انتخاب کنید');
-            return false;
-        }
-        
-        if (selectedValue === 'forward') {
-            const dept = document.querySelector('select[name="to_department"]').value;
-            const user = document.querySelector('select[name="to_user"]').value;
-            if (dept === '' && user === '') {
-                e.preventDefault();
-                alert('لطفاً بخش یا شخص مقصد را انتخاب کنید');
-                return false;
-            }
-            if (actionNotes.value.trim() === '') {
-                e.preventDefault();
-                alert('لطفاً توضیحات را وارد کنید');
-                return false;
-            }
-        }
-        
-        if (selectedValue === 'reject' && actionNotes.value.trim() === '') {
-            e.preventDefault();
-            alert('لطفاً دلیل رد را وارد کنید');
-            return false;
-        }
-    });
-    
-    toggleFields();
+    if ((selectedValue === 'forward' || selectedValue === 'reject') && actionNotes.value.trim() === '') {
+        e.preventDefault();
+        alert('لطفاً توضیحات را وارد کنید');
+        return false;
+    }
+});
+
+// تنظیم اولیه
+toggleFields();
 </script>
 <?php endif; ?>
 
+<!-- تاریخچه ارجاع -->
 <div class="info-card">
-    <h3 style="margin-bottom: 15px;"><i class="fas fa-history" style="color: #3498db;"></i> 📜 تاریخچه ارجاع</h3>
+    <h3 style="margin-bottom: 15px;"><i class="fas fa-history" style="color: #3498db;"></i> تاریخچه ارجاع</h3>
     <?php if (empty($history)): ?>
         <p style="color: #7f8c8d; text-align: center;">هیچ اقدامی ثبت نشده است.</p>
     <?php else: ?>
         <table class="history-table">
             <thead>
-                <tr><th>زمان</th><th>از</th><th>به</th><th>اقدام</th><th>توضیحات</th></tr>
+                <tr>
+                    <th>زمان</th>
+                    <th>از</th>
+                    <th>به</th>
+                    <th>اقدام</th>
+                    <th>توضیحات</th>
+                </tr>
             </thead>
             <tbody>
                 <?php foreach ($history as $h): ?>
                 <tr>
-                    <td><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?></td>
+                    <td style="white-space: nowrap;"><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?></td>
                     <td><?php echo htmlspecialchars($h['from_name']); ?></td>
-                    <td><?php echo htmlspecialchars($h['to_name'] ?? $h['to_department_name'] ?? '-'); ?></td>
-                    <td><?php echo $h['action']; ?></td>
-                    <td><?php echo nl2br(htmlspecialchars($h['notes'] ?? '')); ?></td>
+                    <td>
+                        <?php 
+                        if ($h['to_name']) {
+                            echo '<span style="color:#27ae60;">👤 ' . htmlspecialchars($h['to_name']) . '</span>';
+                        } elseif ($h['to_department_name']) {
+                            echo '<span style="color:#3498db;">🏢 ' . htmlspecialchars($h['to_department_name']) . '</span>';
+                        } else {
+                            echo '-';
+                        }
+                        ?>
+                    </td>
+                    <td>
+                        <?php
+                        $action_icon = ['forward' => '🔄', 'approve' => '✅', 'reject' => '❌'];
+                        $action_text = ['forward' => 'ارجاع', 'approve' => 'تایید', 'reject' => 'رد'];
+                        echo ($action_icon[$h['action']] ?? '📌') . ' ' . ($action_text[$h['action']] ?? $h['action']);
+                        ?>
+                    </td>
+                    <td style="max-width: 250px; word-wrap: break-word;"><?php echo nl2br(htmlspecialchars($h['notes'] ?? '-')); ?></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
