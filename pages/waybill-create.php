@@ -1,4 +1,4 @@
- <?php
+<?php
 require_once __DIR__ . '/../app/Helpers/functions.php';
 session_start();
 
@@ -26,6 +26,12 @@ $companies = $pdo->query("SELECT id, name FROM companies ORDER BY name")->fetchA
 // دریافت لیست فروشندگان
 $vendors = $pdo->query("SELECT id, name FROM vendors ORDER BY name")->fetchAll();
 
+// دریافت لیست بخش‌ها (برای ارجاع)
+$departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
+
+// دریافت لیست همه کاربران (برای ارجاع به شخص)
+$users = $pdo->query("SELECT id, full_name, department_id FROM users ORDER BY full_name")->fetchAll();
+
 $error = '';
 $success = '';
 
@@ -50,6 +56,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
     $insurance_company = trim($_POST['insurance_company'] ?? '');
     $description = trim($_POST['description'] ?? '');
     
+    // فیلدهای ارجاع
+    $forward_to_department = $_POST['forward_to_department'] ?? '';
+    $forward_to_user = $_POST['forward_to_user'] ?? '';
+    
     $errors = [];
     
     if (empty($title)) $errors[] = 'عنوان بارنامه الزامی است';
@@ -60,6 +70,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
     if (empty($cargo_description)) $errors[] = 'نام محموله الزامی است';
     if (empty($loading_origin)) $errors[] = 'مبدا بارگیری الزامی است';
     if (empty($discharge_destination)) $errors[] = 'مقصد تخلیه الزامی است';
+    
+    // اعتبارسنجی ارجاع
+    if (empty($forward_to_department) && empty($forward_to_user)) {
+        $errors[] = 'لطفاً حداقل یکی از فیلدهای ارجاع (بخش یا شخص) را انتخاب کنید';
+    }
     
     // بررسی آپلود فایل
     $file_path = null;
@@ -86,6 +101,18 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
     }
     
     if (empty($errors)) {
+        // اگر هر دو پر شده باشد، اولویت با شخص است
+        if (!empty($forward_to_user)) {
+            $current_holder_user_id = $forward_to_user;
+            $current_holder_department_id = null;
+        } elseif (!empty($forward_to_department)) {
+            $current_holder_user_id = null;
+            $current_holder_department_id = $forward_to_department;
+        } else {
+            $current_holder_user_id = null;
+            $current_holder_department_id = null;
+        }
+        
         $doc_number = 'WBL-' . date('Ymd') . '-' . rand(100, 999);
         
         $data = [
@@ -97,9 +124,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
             'created_by' => $_SESSION['user_id'],
             'company_id' => $company_id,
             'vendor_id' => $vendor_id ?: null,
-            'department_id' => 1,
+            'department_id' => null,
             'document_date' => jdate('Y/m/d'),
-            'status' => 'draft',
+            'status' => 'pending',
             'waybill_number' => $waybill_number,
             'sender_name' => $sender_name,
             'receiver_name' => $receiver_name,
@@ -115,7 +142,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
             'insurance_company' => $insurance_company,
             'waybill_notes' => null,
             'file_path' => $file_path,
-            'file_name' => $_FILES['waybill_file']['name'] ?? null
+            'file_name' => $_FILES['waybill_file']['name'] ?? null,
+            'current_holder_department_id' => $current_holder_department_id,
+            'current_holder_user_id' => $current_holder_user_id,
+            'created_at' => date('Y-m-d H:i:s')
         ];
         
         $fields = implode(', ', array_keys($data));
@@ -125,11 +155,27 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
         $stmt = $pdo->prepare($sql);
         
         if ($stmt->execute($data)) {
-            logActivity($_SESSION['user_id'], 'create_waybill', "بارنامه جدید: $title", $pdo->lastInsertId());
+            $doc_id = $pdo->lastInsertId();
+            
+            // ثبت در تاریخچه ارجاع
+            $forward = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) VALUES (?, ?, ?, ?, 'forward', ?)");
+            $forward->execute([
+                $doc_id, 
+                $_SESSION['user_id'], 
+                $current_holder_department_id, 
+                $current_holder_user_id,
+                'بارنامه جدید ایجاد و ارجاع شد'
+            ]);
+            
+            logActivity($_SESSION['user_id'], 'create_waybill', "بارنامه جدید: $title", $doc_id);
             $success = 'بارنامه با موفقیت ثبت شد. شماره پیگیری: ' . $doc_number;
         } else {
             $errors[] = 'خطا در ثبت بارنامه';
         }
+    }
+    
+    if (!empty($errors)) {
+        $error = implode('<br>', $errors);
     }
 }
 
@@ -145,6 +191,30 @@ ob_start();
         border-radius: 5px;
         padding: 5px;
     }
+    .form-group { margin-bottom: 20px; }
+    .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+    input, select, textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+    .row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+    .row-3col { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px; }
+    .btn-submit { background: #27ae60; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer; font-size: 16px; }
+    .btn-back { background: #95a5a6; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none; }
+    .alert { padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+    .alert-danger { background: #f8d7da; color: #721c24; }
+    .alert-success { background: #d4edda; color: #155724; }
+    .required { color: red; }
+    .help-text { font-size: 12px; color: #7f8c8d; margin-top: 5px; display: block; }
+    .forward-section {
+        background: #f0f8ff; 
+        padding: 20px; 
+        border-radius: 10px; 
+        margin: 20px 0;
+    }
+    .forward-title {
+        font-size: 18px;
+        font-weight: bold;
+        margin-bottom: 15px;
+        color: #2c3e50;
+    }
 </style>
 
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
@@ -154,33 +224,31 @@ ob_start();
     </a>
 </div>
 
-<?php if (!empty($errors)): ?>
-    <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-        <ul><?php foreach ($errors as $err) echo "<li>$err</li>"; ?></ul>
-    </div>
+<?php if ($error): ?>
+    <div class="alert alert-danger"><?php echo $error; ?></div>
 <?php endif; ?>
 
 <?php if ($success): ?>
-    <div style="background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-bottom: 20px;"><?php echo $success; ?></div>
+    <div class="alert alert-success"><?php echo $success; ?></div>
 <?php endif; ?>
 
 <div style="background: white; border-radius: 10px; padding: 20px;">
     <form method="POST" enctype="multipart/form-data">
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">عنوان بارنامه *</label>
-                <input type="text" name="title" required value="<?php echo htmlspecialchars($_POST['title'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+        <div class="row-2col">
+            <div class="form-group">
+                <label>عنوان بارنامه <span class="required">*</span></label>
+                <input type="text" name="title" required value="<?php echo htmlspecialchars($_POST['title'] ?? ''); ?>">
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">شماره بارنامه *</label>
-                <input type="text" name="waybill_number" required value="<?php echo htmlspecialchars($_POST['waybill_number'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>شماره بارنامه <span class="required">*</span></label>
+                <input type="text" name="waybill_number" required value="<?php echo htmlspecialchars($_POST['waybill_number'] ?? ''); ?>">
             </div>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">انتخاب شرکت *</label>
-                <select name="company_id" required style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+        <div class="row-2col">
+            <div class="form-group">
+                <label>انتخاب شرکت <span class="required">*</span></label>
+                <select name="company_id" required>
                     <option value="">انتخاب کنید</option>
                     <?php foreach ($companies as $comp): ?>
                         <option value="<?php echo $comp['id']; ?>" <?php echo ($_POST['company_id'] ?? '') == $comp['id'] ? 'selected' : ''; ?>>
@@ -189,9 +257,9 @@ ob_start();
                     <?php endforeach; ?>
                 </select>
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px;">انتخاب فروشنده</label>
-                <select name="vendor_id" id="vendorSelect" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>انتخاب فروشنده</label>
+                <select name="vendor_id" id="vendorSelect">
                     <option value="">انتخاب کنید</option>
                     <?php foreach ($vendors as $vendor): ?>
                         <option value="<?php echo $vendor['id']; ?>" <?php echo ($_POST['vendor_id'] ?? '') == $vendor['id'] ? 'selected' : ''; ?>>
@@ -202,85 +270,120 @@ ob_start();
             </div>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">نام فرستنده *</label>
-                <input type="text" name="sender_name" required value="<?php echo htmlspecialchars($_POST['sender_name'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+        <div class="row-3col">
+            <div class="form-group">
+                <label>نام فرستنده <span class="required">*</span></label>
+                <input type="text" name="sender_name" required value="<?php echo htmlspecialchars($_POST['sender_name'] ?? ''); ?>">
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">نام گیرنده *</label>
-                <input type="text" name="receiver_name" required value="<?php echo htmlspecialchars($_POST['receiver_name'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>نام گیرنده <span class="required">*</span></label>
+                <input type="text" name="receiver_name" required value="<?php echo htmlspecialchars($_POST['receiver_name'] ?? ''); ?>">
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">نام محموله *</label>
-                <input type="text" name="cargo_description" required value="<?php echo htmlspecialchars($_POST['cargo_description'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
-            </div>
-        </div>
-
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">مبدا بارگیری *</label>
-                <input type="text" name="loading_origin" required value="<?php echo htmlspecialchars($_POST['loading_origin'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
-            </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px; font-weight: bold;">مقصد تخلیه *</label>
-                <input type="text" name="discharge_destination" required value="<?php echo htmlspecialchars($_POST['discharge_destination'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>نام محموله <span class="required">*</span></label>
+                <input type="text" name="cargo_description" required value="<?php echo htmlspecialchars($_POST['cargo_description'] ?? ''); ?>">
             </div>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
-            <div>
-                <label style="display: block; margin-bottom: 5px;">راننده اول</label>
-                <input type="text" name="driver1_name" value="<?php echo htmlspecialchars($_POST['driver1_name'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+        <div class="row-2col">
+            <div class="form-group">
+                <label>مبدا بارگیری <span class="required">*</span></label>
+                <input type="text" name="loading_origin" required value="<?php echo htmlspecialchars($_POST['loading_origin'] ?? ''); ?>">
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px;">راننده دوم</label>
-                <input type="text" name="driver2_name" value="<?php echo htmlspecialchars($_POST['driver2_name'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
-            </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px;">شماره پلاک</label>
-                <input type="text" name="vehicle_plate" value="<?php echo htmlspecialchars($_POST['vehicle_plate'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>مقصد تخلیه <span class="required">*</span></label>
+                <input type="text" name="discharge_destination" required value="<?php echo htmlspecialchars($_POST['discharge_destination'] ?? ''); ?>">
             </div>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
-            <div>
-                <label style="display: block; margin-bottom: 5px;">تعداد</label>
-                <input type="number" name="quantity" value="<?php echo $_POST['quantity'] ?? ''; ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+        <div class="row-3col">
+            <div class="form-group">
+                <label>راننده اول</label>
+                <input type="text" name="driver1_name" value="<?php echo htmlspecialchars($_POST['driver1_name'] ?? ''); ?>">
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px;">وزن</label>
-                <input type="number" name="weight" value="<?php echo $_POST['weight'] ?? ''; ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>راننده دوم</label>
+                <input type="text" name="driver2_name" value="<?php echo htmlspecialchars($_POST['driver2_name'] ?? ''); ?>">
             </div>
-            <div>
-                <label style="display: block; margin-bottom: 5px;">مسئول حمل</label>
-                <input type="text" name="carrier_responsible" value="<?php echo htmlspecialchars($_POST['carrier_responsible'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+            <div class="form-group">
+                <label>شماره پلاک</label>
+                <input type="text" name="vehicle_plate" value="<?php echo htmlspecialchars($_POST['vehicle_plate'] ?? ''); ?>">
             </div>
         </div>
 
-        <div style="margin-bottom: 20px;">
-            <label style="display: block; margin-bottom: 5px;">شرکت بیمه</label>
-            <input type="text" name="insurance_company" value="<?php echo htmlspecialchars($_POST['insurance_company'] ?? ''); ?>" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+        <div class="row-3col">
+            <div class="form-group">
+                <label>تعداد</label>
+                <input type="number" name="quantity" value="<?php echo $_POST['quantity'] ?? ''; ?>">
+            </div>
+            <div class="form-group">
+                <label>وزن</label>
+                <input type="number" name="weight" value="<?php echo $_POST['weight'] ?? ''; ?>">
+            </div>
+            <div class="form-group">
+                <label>مسئول حمل</label>
+                <input type="text" name="carrier_responsible" value="<?php echo htmlspecialchars($_POST['carrier_responsible'] ?? ''); ?>">
+            </div>
         </div>
 
-        <div style="margin-bottom: 20px;">
-            <label style="display: block; margin-bottom: 5px;">آپلود فایل بارنامه (عکس یا PDF)</label>
-            <input type="file" name="waybill_file" accept=".jpg,.jpeg,.png,.pdf" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
-            <small style="color: #666;">فرمت‌های مجاز: jpg, jpeg, png, pdf | حداکثر حجم: ۵ مگابایت</small>
-            
+        <div class="form-group">
+            <label>شرکت بیمه</label>
+            <input type="text" name="insurance_company" value="<?php echo htmlspecialchars($_POST['insurance_company'] ?? ''); ?>">
+        </div>
+
+        <div class="form-group">
+            <label>آپلود فایل بارنامه (عکس یا PDF)</label>
+            <input type="file" name="waybill_file" accept=".jpg,.jpeg,.png,.pdf">
+            <small class="help-text">فرمت‌های مجاز: jpg, jpeg, png, pdf | حداکثر حجم: ۵ مگابایت</small>
             <div id="filePreview" style="margin-top: 15px; display: none;">
                 <img id="imagePreview" src="#" style="max-width: 200px; max-height: 200px; border: 1px solid #ddd; border-radius: 5px; padding: 5px;">
             </div>
         </div>
 
-        <div style="margin-bottom: 20px;">
-            <label style="display: block; margin-bottom: 5px;">توضیحات</label>
-            <textarea name="description" rows="4" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;"><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
+        <div class="form-group">
+            <label>توضیحات</label>
+            <textarea name="description" rows="3"><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
         </div>
 
-        <button type="submit" name="create_waybill" style="background: #3498db; color: white; border: none; padding: 12px 30px; border-radius: 5px; cursor: pointer;">
-            ثبت بارنامه
-        </button>
+        <!-- بخش ارجاع -->
+        <div class="forward-section">
+            <div class="forward-title">🔁 ارجاع بارنامه <span class="required">*</span></div>
+            <small class="help-text" style="margin-bottom: 15px; display: block;">حداقل یکی از گزینه‌های زیر باید انتخاب شود</small>
+            
+            <div class="row-2col">
+                <div class="form-group">
+                    <label>📋 ارجاع به بخش</label>
+                    <select name="forward_to_department">
+                        <option value="">--- انتخاب کنید ---</option>
+                        <?php foreach ($departments as $dept): ?>
+                            <option value="<?php echo $dept['id']; ?>" <?php echo ($_POST['forward_to_department'] ?? '') == $dept['id'] ? 'selected' : ''; ?>>
+                                🏢 <?php echo htmlspecialchars($dept['name']); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <small class="help-text">در صورت انتخاب، بارنامه برای <strong>همه کاربران این بخش</strong> قابل مشاهده خواهد بود</small>
+                </div>
+                
+                <div class="form-group">
+                    <label>👤 ارجاع به شخص</label>
+                    <select name="forward_to_user">
+                        <option value="">--- انتخاب کنید ---</option>
+                        <?php foreach ($users as $user): ?>
+                            <option value="<?php echo $user['id']; ?>" <?php echo ($_POST['forward_to_user'] ?? '') == $user['id'] ? 'selected' : ''; ?>>
+                                👤 <?php echo htmlspecialchars($user['full_name']); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <small class="help-text">در صورت انتخاب، بارنامه <strong>فقط برای این شخص خاص</strong> قابل مشاهده خواهد بود</small>
+                </div>
+            </div>
+            
+            <div id="selection-warning" style="color: #e74c3c; font-size: 13px; margin-top: 15px; display: none; background: #fef0e0; padding: 10px; border-radius: 5px;">
+                ⚠️ لطفاً حداقل یکی از گزینه‌های ارجاع (بخش یا شخص) را انتخاب کنید
+            </div>
+        </div>
+
+        <button type="submit" name="create_waybill" class="btn-submit" id="submitBtn">ثبت بارنامه</button>
     </form>
 </div>
 
@@ -305,6 +408,22 @@ document.querySelector('input[name="waybill_file"]').addEventListener('change', 
         reader.readAsDataURL(file);
     } else {
         preview.style.display = 'none';
+    }
+});
+
+// اعتبارسنجی قبل از ارسال
+document.getElementById('submitBtn').addEventListener('click', function(e) {
+    var dept = document.querySelector('select[name="forward_to_department"]').value;
+    var user = document.querySelector('select[name="forward_to_user"]').value;
+    var warning = document.getElementById('selection-warning');
+    
+    if (dept === '' && user === '') {
+        e.preventDefault();
+        warning.style.display = 'block';
+        warning.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(() => { warning.style.display = 'none'; }, 4000);
+    } else {
+        warning.style.display = 'none';
     }
 });
 </script>
