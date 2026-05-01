@@ -7,7 +7,6 @@ if (!isset($_SESSION['user_id']) || !hasPermission('create_waybill')) {
     exit;
 }
 
-// اتصال به دیتابیس
 $host = 'localhost';
 $dbname = 'invoice_system';
 $username_db = 'root';
@@ -20,16 +19,9 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// دریافت لیست شرکت‌ها
 $companies = $pdo->query("SELECT id, name FROM companies ORDER BY name")->fetchAll();
-
-// دریافت لیست فروشندگان
 $vendors = $pdo->query("SELECT id, name FROM vendors ORDER BY name")->fetchAll();
-
-// دریافت لیست بخش‌ها (برای ارجاع)
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-
-// دریافت لیست همه کاربران (برای ارجاع به شخص)
 $users = $pdo->query("SELECT id, full_name, department_id FROM users ORDER BY full_name")->fetchAll();
 
 $error = '';
@@ -37,11 +29,11 @@ $success = '';
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
     
-    // دریافت مقادیر فرم
     $title = trim($_POST['title'] ?? '');
     $company_id = $_POST['company_id'] ?? '';
     $vendor_id = $_POST['vendor_id'] ?? '';
     $waybill_number = trim($_POST['waybill_number'] ?? '');
+    $amount = str_replace(',', '', $_POST['amount'] ?? 0);
     $sender_name = trim($_POST['sender_name'] ?? '');
     $receiver_name = trim($_POST['receiver_name'] ?? '');
     $cargo_description = trim($_POST['cargo_description'] ?? '');
@@ -56,7 +48,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
     $insurance_company = trim($_POST['insurance_company'] ?? '');
     $description = trim($_POST['description'] ?? '');
     
-    // فیلدهای ارجاع
     $forward_to_department = $_POST['forward_to_department'] ?? '';
     $forward_to_user = $_POST['forward_to_user'] ?? '';
     
@@ -64,19 +55,18 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
     
     if (empty($title)) $errors[] = 'عنوان بارنامه الزامی است';
     if (empty($company_id)) $errors[] = 'انتخاب شرکت الزامی است';
+    if (empty($vendor_id)) $errors[] = 'انتخاب فروشنده الزامی است';
     if (empty($waybill_number)) $errors[] = 'شماره بارنامه الزامی است';
     if (empty($sender_name)) $errors[] = 'نام فرستنده الزامی است';
     if (empty($receiver_name)) $errors[] = 'نام گیرنده الزامی است';
     if (empty($cargo_description)) $errors[] = 'نام محموله الزامی است';
     if (empty($loading_origin)) $errors[] = 'مبدا بارگیری الزامی است';
     if (empty($discharge_destination)) $errors[] = 'مقصد تخلیه الزامی است';
-    
-    // اعتبارسنجی ارجاع
     if (empty($forward_to_department) && empty($forward_to_user)) {
         $errors[] = 'لطفاً حداقل یکی از فیلدهای ارجاع (بخش یا شخص) را انتخاب کنید';
     }
     
-    // بررسی آپلود فایل
+    // آپلود فایل
     $file_path = null;
     $file_name = null;
     
@@ -99,89 +89,93 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['create_waybill'])) {
             $errors[] = 'فرمت فایل باید JPEG، PNG یا PDF باشد و حداکثر حجم ۵ مگابایت';
         }
     }
-    
-    if (empty($errors)) {
-        // اگر هر دو پر شده باشد، اولویت با شخص است
-        if (!empty($forward_to_user)) {
-            $current_holder_user_id = $forward_to_user;
-            $current_holder_department_id = null;
-        } elseif (!empty($forward_to_department)) {
-            $current_holder_user_id = null;
-            $current_holder_department_id = $forward_to_department;
-        } else {
-            $current_holder_user_id = null;
-            $current_holder_department_id = null;
-        }
-        
-        $doc_number = 'WBL-' . date('Ymd') . '-' . rand(100, 999);
-        
-        $data = [
-            'document_number' => $doc_number,
-            'type' => 'waybill',
-            'title' => $title,
-            'description' => $description,
-            'amount' => null,
-            'created_by' => $_SESSION['user_id'],
-            'company_id' => $company_id,
-            'vendor_id' => $vendor_id ?: null,
-            'department_id' => null,
-            'document_date' => jdate('Y/m/d'),
-            'status' => 'pending',
-            'waybill_number' => $waybill_number,
-            'sender_name' => $sender_name,
-            'receiver_name' => $receiver_name,
-            'cargo_description' => $cargo_description,
-            'loading_origin' => $loading_origin,
-            'discharge_destination' => $discharge_destination,
-            'driver1_name' => $driver1_name,
-            'driver2_name' => $driver2_name,
-            'vehicle_plate' => $vehicle_plate,
-            'quantity' => $quantity,
-            'weight' => $weight,
-            'carrier_responsible' => $carrier_responsible,
-            'insurance_company' => $insurance_company,
-            'waybill_notes' => null,
-            'file_path' => $file_path,
-            'file_name' => $_FILES['waybill_file']['name'] ?? null,
-            'current_holder_department_id' => $current_holder_department_id,
-            'current_holder_user_id' => $current_holder_user_id,
-            'created_at' => date('Y-m-d H:i:s')
-        ];
-        
-        $fields = implode(', ', array_keys($data));
-        $placeholders = ':' . implode(', :', array_keys($data));
-        
-        $sql = "INSERT INTO documents ($fields) VALUES ($placeholders)";
-        $stmt = $pdo->prepare($sql);
-        
-        if ($stmt->execute($data)) {
-            $doc_id = $pdo->lastInsertId();
-            
-            // ثبت در تاریخچه ارجاع
-            $forward = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) VALUES (?, ?, ?, ?, 'forward', ?)");
-            $forward->execute([
-                $doc_id, 
-                $_SESSION['user_id'], 
-                $current_holder_department_id, 
-                $current_holder_user_id,
-                'بارنامه جدید ایجاد و ارجاع شد'
-            ]);
-            
-            logActivity($_SESSION['user_id'], 'create_waybill', "بارنامه جدید: $title", $doc_id);
-            $success = 'بارنامه با موفقیت ثبت شد. شماره پیگیری: ' . $doc_number;
-        } else {
-            $errors[] = 'خطا در ثبت بارنامه';
-        }
-    }
-    
-    if (!empty($errors)) {
-        $error = implode('<br>', $errors);
-    }
-}
-
-$page_title = 'ایجاد بارنامه جدید';
-ob_start();
-?>
+	
+	if (empty($errors)) {
+		// اولویت ارجاع
+		if (!empty($forward_to_user)) {
+			$current_holder_user_id = $forward_to_user;
+			$current_holder_department_id = null;
+		} elseif (!empty($forward_to_department)) {
+			$current_holder_user_id = null;
+			$current_holder_department_id = $forward_to_department;
+		} else {
+			$current_holder_user_id = null;
+			$current_holder_department_id = null;
+		}
+		
+		// دریافت مخفف شرکت برای فرمت بارنامه
+		$companyInfo = $pdo->prepare("SELECT short_name FROM companies WHERE id = ?");
+		$companyInfo->execute([$company_id]);
+		$companyData = $companyInfo->fetch();
+		$short_name = $companyData['short_name'] ?? 'wbl';
+		
+		// تولید شماره بارنامه با فرمت: kyhn-B/L-1234
+		$short = !empty($short_name) ? strtolower($short_name) : 'wbl';
+		$clean_number = preg_replace('/[^0-9]/', '', $waybill_number);
+		if (empty($clean_number)) $clean_number = rand(1000, 9999);
+		$formatted_waybill_number = $short . '-B/L-' . $clean_number;
+		
+		$data = [
+			'document_number' => $formatted_waybill_number,
+			'type' => 'waybill',
+			'title' => $title,
+			'description' => $description,
+			'amount' => $amount ?: null,
+			'created_by' => $_SESSION['user_id'],
+			'company_id' => $company_id,
+			'vendor_id' => $vendor_id,
+			'department_id' => null,
+			'document_date' => jdate('Y/m/d'),
+			'status' => 'pending',
+			'waybill_number' => $formatted_waybill_number,
+			'sender_name' => $sender_name,
+			'receiver_name' => $receiver_name,
+			'cargo_description' => $cargo_description,
+			'loading_origin' => $loading_origin,
+			'discharge_destination' => $discharge_destination,
+			'driver1_name' => $driver1_name,
+			'driver2_name' => $driver2_name,
+			'vehicle_plate' => $vehicle_plate,
+			'quantity' => $quantity,
+			'weight' => $weight,
+			'carrier_responsible' => $carrier_responsible,
+			'insurance_company' => $insurance_company,
+			'waybill_notes' => null,
+			'file_path' => $file_path,
+			'file_name' => $_FILES['waybill_file']['name'] ?? null,
+			'current_holder_department_id' => $current_holder_department_id,
+			'current_holder_user_id' => $current_holder_user_id,
+			'created_at' => date('Y-m-d H:i:s')
+		];
+		
+		$fields = implode(', ', array_keys($data));
+		$placeholders = ':' . implode(', :', array_keys($data));
+		
+		$sql = "INSERT INTO documents ($fields) VALUES ($placeholders)";
+		$stmt = $pdo->prepare($sql);
+		
+		if ($stmt->execute($data)) {
+			$doc_id = $pdo->lastInsertId();
+			
+			$forward = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) VALUES (?, ?, ?, ?, 'forward', ?)");
+			$forward->execute([
+				$doc_id,
+				$_SESSION['user_id'],
+				$current_holder_department_id,
+				$current_holder_user_id,
+				'بارنامه جدید ایجاد و ارجاع شد'
+			]);
+			
+			logActivity($_SESSION['user_id'], 'create_waybill', "بارنامه جدید: $title", $doc_id);
+			$success = 'بارنامه با موفقیت ثبت شد. شماره بارنامه: ' . $formatted_waybill_number;
+		} else {
+			$errors[] = 'خطا در ثبت بارنامه';
+		}
+	}
+	
+	if (!empty($errors)) {
+		$error = implode('<br>', $errors);
+	}
 
 <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
 <style>
@@ -234,6 +228,7 @@ ob_start();
 
 <div style="background: white; border-radius: 10px; padding: 20px;">
     <form method="POST" enctype="multipart/form-data">
+        <!-- ردیف 1: عنوان + شماره بارنامه -->
         <div class="row-2col">
             <div class="form-group">
                 <label>عنوان بارنامه <span class="required">*</span></label>
@@ -245,31 +240,38 @@ ob_start();
             </div>
         </div>
 
+        <!-- ردیف 2: مبلغ + فروشنده -->
+        <div class="row-2col">
+            <div class="form-group">
+                <label>مبلغ بارنامه (تومان)</label>
+                <input type="text" name="amount" id="amount" onkeyup="formatNumber(this)" value="<?php echo htmlspecialchars($_POST['amount'] ?? ''); ?>">
+            </div>
+            <div class="form-group">
+                <label>فروشنده <span class="required">*</span></label>
+                <select name="vendor_id" required>
+                    <option value="">انتخاب کنید</option>
+                    <?php foreach ($vendors as $vendor): ?>
+                        <option value="<?php echo $vendor['id']; ?>" <?php echo ($_POST['vendor_id'] ?? '') == $vendor['id'] ? 'selected' : ''; ?>><?php echo $vendor['name']; ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+        </div>
+
+        <!-- ردیف 3: شرکت + (خالی برای چیدمان) -->
         <div class="row-2col">
             <div class="form-group">
                 <label>انتخاب شرکت <span class="required">*</span></label>
                 <select name="company_id" required>
                     <option value="">انتخاب کنید</option>
                     <?php foreach ($companies as $comp): ?>
-                        <option value="<?php echo $comp['id']; ?>" <?php echo ($_POST['company_id'] ?? '') == $comp['id'] ? 'selected' : ''; ?>>
-                            <?php echo htmlspecialchars($comp['name']); ?>
-                        </option>
+                        <option value="<?php echo $comp['id']; ?>" <?php echo ($_POST['company_id'] ?? '') == $comp['id'] ? 'selected' : ''; ?>><?php echo $comp['name']; ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
-            <div class="form-group">
-                <label>انتخاب فروشنده</label>
-                <select name="vendor_id" id="vendorSelect">
-                    <option value="">انتخاب کنید</option>
-                    <?php foreach ($vendors as $vendor): ?>
-                        <option value="<?php echo $vendor['id']; ?>" <?php echo ($_POST['vendor_id'] ?? '') == $vendor['id'] ? 'selected' : ''; ?>>
-                            <?php echo htmlspecialchars($vendor['name']); ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
+            <div></div>
         </div>
 
+        <!-- ردیف 4: فرستنده + گیرنده + محموله -->
         <div class="row-3col">
             <div class="form-group">
                 <label>نام فرستنده <span class="required">*</span></label>
@@ -285,6 +287,7 @@ ob_start();
             </div>
         </div>
 
+        <!-- ردیف 5: مبدا + مقصد -->
         <div class="row-2col">
             <div class="form-group">
                 <label>مبدا بارگیری <span class="required">*</span></label>
@@ -296,6 +299,7 @@ ob_start();
             </div>
         </div>
 
+        <!-- ردیف 6: راننده اول + راننده دوم + پلاک -->
         <div class="row-3col">
             <div class="form-group">
                 <label>راننده اول</label>
@@ -311,6 +315,7 @@ ob_start();
             </div>
         </div>
 
+        <!-- ردیف 7: تعداد + وزن + مسئول حمل -->
         <div class="row-3col">
             <div class="form-group">
                 <label>تعداد</label>
@@ -326,11 +331,13 @@ ob_start();
             </div>
         </div>
 
+        <!-- ردیف 8: شرکت بیمه -->
         <div class="form-group">
             <label>شرکت بیمه</label>
             <input type="text" name="insurance_company" value="<?php echo htmlspecialchars($_POST['insurance_company'] ?? ''); ?>">
         </div>
 
+        <!-- آپلود فایل -->
         <div class="form-group">
             <label>آپلود فایل بارنامه (عکس یا PDF)</label>
             <input type="file" name="waybill_file" accept=".jpg,.jpeg,.png,.pdf">
@@ -340,6 +347,7 @@ ob_start();
             </div>
         </div>
 
+        <!-- توضیحات -->
         <div class="form-group">
             <label>توضیحات</label>
             <textarea name="description" rows="3"><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
@@ -394,6 +402,11 @@ $(document).ready(function() {
     $('#vendorSelect').select2({ width: '100%' });
 });
 
+function formatNumber(input) {
+    let val = input.value.replace(/,/g, '');
+    if (!isNaN(val) && val !== '') input.value = Number(val).toLocaleString();
+}
+
 document.querySelector('input[name="waybill_file"]').addEventListener('change', function(e) {
     const file = e.target.files[0];
     const preview = document.getElementById('filePreview');
@@ -411,7 +424,6 @@ document.querySelector('input[name="waybill_file"]').addEventListener('change', 
     }
 });
 
-// اعتبارسنجی قبل از ارسال
 document.getElementById('submitBtn').addEventListener('click', function(e) {
     var dept = document.querySelector('select[name="forward_to_department"]').value;
     var user = document.querySelector('select[name="forward_to_user"]').value;
