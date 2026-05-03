@@ -57,10 +57,7 @@ $is_holder_department = ($waybill['current_holder_department_id'] && in_array($w
 $is_holder = $is_holder_user || $is_holder_department;
 $is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 
-// قوانین جدید:
-// - ارجاع: فقط گیرنده فعلی می‌تواند (اگر بارنامه تایید/رد نشده باشد)
 $can_forward = $is_holder && !in_array($waybill['status'], ['approved', 'rejected']);
-// - تایید/رد: فقط ایجادکننده یا ادمین
 $can_approve_reject = ($is_creator || $is_admin) && !in_array($waybill['status'], ['approved', 'rejected']);
 
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
@@ -136,44 +133,72 @@ ob_start();
 ?>
 
 <style>
-    .info-card { background: white; border-radius: 16px; padding: 24px; margin-bottom: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-    .info-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
-    .info-item small { display: block; color: #7f8c8d; font-size: 11px; margin-bottom: 5px; }
-    .info-item strong { font-size: 14px; }
+    .info-card { background: white; border-radius: 20px; padding: 24px; margin-bottom: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+    .info-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+    .info-section { background: #f8f9fa; border-radius: 16px; padding: 20px; }
+    .info-section h4 { margin: 0 0 15px 0; color: #2c3e50; font-size: 16px; border-bottom: 2px solid #3498db; padding-bottom: 8px; display: inline-block; }
+    .info-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 14px; flex-wrap: wrap; }
+    .info-row .label { width: 100px; color: #7f8c8d; font-weight: 500; }
+    .info-row .value { color: #2c3e50; font-weight: 500; }
     .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
     .status-pending { background: #fef9e6; color: #d4a017; }
     .status-forwarded { background: #fff3cd; color: #f39c12; }
     .status-approved { background: #d4edda; color: #2ecc71; }
     .status-rejected { background: #f8d7da; color: #e74c3c; }
+    
+    .file-preview { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; margin-top: 15px; }
+    .thumbnail { width: 80px; height: 80px; background: #f0f2f5; border-radius: 12px; display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden; transition: all 0.3s; border: 1px solid #e0e0e0; }
+    .thumbnail:hover { transform: scale(1.05); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+    .thumbnail img { width: 100%; height: 100%; object-fit: cover; }
+    .thumbnail .pdf-icon { font-size: 32px; color: #e74c3c; }
+    .file-info { display: flex; flex-direction: column; gap: 5px; }
+    .file-link { background: #3498db; color: white; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; width: fit-content; }
+    .file-link:hover { background: #2980b9; }
+    .preview-hint { font-size: 11px; color: #7f8c8d; }
+    
+    .history-wrapper { max-height: 400px; overflow-y: auto; border-radius: 12px; border: 1px solid #eef2f5; }
+    .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .history-table th { background: #f8f9fa; padding: 12px 10px; text-align: right; font-weight: 600; color: #2c3e50; position: sticky; top: 0; border-bottom: 1px solid #e0e0e0; }
+    .history-table td { padding: 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    .history-table tr:hover { background: #f8f9fa; }
+    .action-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 500; }
+    .action-forward { background: #fff3cd; color: #f39c12; }
+    .action-approve { background: #d4edda; color: #2ecc71; }
+    .action-reject { background: #f8d7da; color: #e74c3c; }
+    
     .holder-box { background: #f0f7ff; border-radius: 12px; padding: 16px; margin-bottom: 24px; border-right: 4px solid #3498db; }
-    .action-form { background: white; border-radius: 16px; padding: 24px; margin-bottom: 24px; border: 1px solid #e9ecef; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-    .action-form h3 { margin-bottom: 20px; color: #2c3e50; font-size: 18px; }
+    .action-form { background: white; border-radius: 20px; padding: 24px; margin-bottom: 24px; border: 1px solid #e9ecef; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .form-group { margin-bottom: 20px; }
     .form-group label { display: block; margin-bottom: 8px; font-weight: 500; color: #2c3e50; font-size: 13px; }
-    .form-group label .required-star { color: #e74c3c; margin-right: 3px; }
-    .form-group select, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 10px; font-size: 14px; transition: all 0.3s; }
-    .form-group select:focus, .form-group textarea:focus { outline: none; border-color: #3498db; box-shadow: 0 0 0 3px rgba(52,152,219,0.1); }
-    .btn-submit { background: #27ae60; color: white; border: none; padding: 12px 24px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.3s; }
-    .btn-submit:hover { background: #219a52; transform: translateY(-2px); }
-    .btn-approve { background: #2ecc71; }
-    .btn-approve:hover { background: #27ae60; }
-    .btn-reject { background: #e74c3c; }
-    .btn-reject:hover { background: #c0392b; }
+    .form-group select, .form-group textarea { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; font-size: 14px; }
+    .btn-submit { background: #27ae60; color: white; border: none; padding: 12px 24px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 500; }
     .alert-error { background: #f8d7da; color: #721c24; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     .alert-success { background: #d4edda; color: #155724; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
-    .history-table { width: 100%; border-collapse: collapse; }
-    .history-table th, .history-table td { padding: 12px; text-align: right; border-bottom: 1px solid #eee; }
-    .history-table th { background: #f8f9fa; font-weight: 600; }
-    .info-note { background: #fef9e6; border-radius: 12px; padding: 16px; margin-bottom: 24px; text-align: center; color: #d4a017; }
+    
+    .modal { display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.9); }
+    .modal-content { margin: auto; display: block; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 90%; max-height: 90%; }
+    .modal-content img { max-width: 100%; max-height: 90vh; border-radius: 8px; }
+    .modal-content iframe { width: 80vw; height: 80vh; border: none; border-radius: 8px; }
+    .close-modal { position: absolute; top: 20px; right: 35px; color: white; font-size: 40px; cursor: pointer; }
+    
     .row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-    hr { margin: 20px 0; border: none; border-top: 1px solid #eee; }
+    @media (max-width: 768px) {
+        .info-grid-2col { grid-template-columns: 1fr; }
+        .row-2col { grid-template-columns: 1fr; }
+        .info-row .label { width: 80px; }
+    }
 </style>
 
 <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
     <h1 style="margin: 0;">🚛 مشاهده بارنامه <?php echo htmlspecialchars($waybill['document_number']); ?></h1>
-    <a href="waybills.php" style="background: #95a5a6; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none; font-size: 14px;">
-        <i class="fas fa-arrow-right"></i> بازگشت
-    </a>
+    <div style="display: flex; gap: 10px;">
+        <a href="waybill-create.php" style="background: #27ae60; color: white; padding: 8px 18px; border-radius: 8px; text-decoration: none; font-size: 14px;">
+            <i class="fas fa-plus"></i> بارنامه جدید
+        </a>
+        <a href="waybills.php" style="background: #95a5a6; color: white; padding: 8px 18px; border-radius: 8px; text-decoration: none;">
+            <i class="fas fa-arrow-right"></i> بازگشت
+        </a>
+    </div>
 </div>
 
 <?php if ($error): ?>
@@ -183,55 +208,76 @@ ob_start();
     <div class="alert-success"><?php echo $success; ?></div>
 <?php endif; ?>
 
+<!-- اطلاعات بارنامه در دو ستون -->
 <div class="info-card">
-    <div class="info-grid">
-        <div class="info-item"><small>شماره بارنامه</small><strong><?php echo htmlspecialchars($waybill['document_number']); ?></strong></div>
-        <div class="info-item"><small>عنوان</small><strong><?php echo htmlspecialchars($waybill['title']); ?></strong></div>
-        <div class="info-item"><small>شرکت</small><strong><?php echo htmlspecialchars($waybill['company_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>فروشنده</small><strong><?php echo htmlspecialchars($waybill['vendor_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>مبلغ</small><strong><?php echo number_format($waybill['amount'] ?? 0); ?> تومان</strong></div>
-        <div class="info-item"><small>فرستنده</small><strong><?php echo htmlspecialchars($waybill['sender_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>گیرنده</small><strong><?php echo htmlspecialchars($waybill['receiver_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>وضعیت</small>
-            <strong>
-                <?php
-                $status_class = 'status-' . ($waybill['status'] ?? 'pending');
-                $status_texts = [
-                    'pending' => 'در انتظار اقدام',
-                    'forwarded' => 'ارسال شده',
-                    'approved' => 'تایید شده',
-                    'rejected' => 'رد شده'
-                ];
-                $status_text = $status_texts[$waybill['status']] ?? $waybill['status'];
-                echo '<span class="status-badge ' . $status_class . '">' . $status_text . '</span>';
-                ?>
-            </strong>
+    <div class="info-grid-2col">
+        <div class="info-section">
+            <h4>📋 اطلاعات اصلی</h4>
+            <div class="info-row"><span class="label">📄 شماره بارنامه:</span><span class="value"><?php echo htmlspecialchars($waybill['document_number']); ?></span></div>
+            <div class="info-row"><span class="label">🏷️ عنوان:</span><span class="value"><?php echo htmlspecialchars($waybill['title']); ?></span></div>
+            <div class="info-row"><span class="label">🏢 شرکت:</span><span class="value"><?php echo htmlspecialchars($waybill['company_name'] ?? '-'); ?></span></div>
+            <div class="info-row"><span class="label">🏪 فروشنده:</span><span class="value"><?php echo htmlspecialchars($waybill['vendor_name'] ?? '-'); ?></span></div>
+            <div class="info-row"><span class="label">📅 تاریخ ثبت:</span><span class="value"><?php echo jdate('Y/m/d', strtotime($waybill['created_at'])); ?></span></div>
+        </div>
+        
+        <div class="info-section">
+            <h4>🚚 اطلاعات حمل</h4>
+            <div class="info-row"><span class="label">👤 فرستنده:</span><span class="value"><?php echo htmlspecialchars($waybill['sender_name'] ?? '-'); ?></span></div>
+            <div class="info-row"><span class="label">👤 گیرنده:</span><span class="value"><?php echo htmlspecialchars($waybill['receiver_name'] ?? '-'); ?></span></div>
+            <div class="info-row"><span class="label">📍 مبدا:</span><span class="value"><?php echo htmlspecialchars($waybill['loading_origin'] ?? '-'); ?></span></div>
+            <div class="info-row"><span class="label">📍 مقصد:</span><span class="value"><?php echo htmlspecialchars($waybill['discharge_destination'] ?? '-'); ?></span></div>
+            <div class="info-row"><span class="label">💰 مبلغ:</span><span class="value"><?php echo number_format($waybill['amount'] ?? 0); ?> تومان</span></div>
+            <div class="info-row"><span class="label">📊 وضعیت:</span>
+                <span class="status-badge status-<?php echo $waybill['status'] ?? 'pending'; ?>">
+                    <?php
+                    $status_texts = ['pending' => '⏳ در انتظار اقدام', 'forwarded' => '📨 ارسال شده', 'approved' => '✅ تایید شده', 'rejected' => '❌ رد شده'];
+                    echo $status_texts[$waybill['status']] ?? $waybill['status'];
+                    ?>
+                </span>
+            </div>
         </div>
     </div>
-    <div class="info-grid" style="margin-top:15px;">
-        <div class="info-item"><small>مبدا بارگیری</small><strong><?php echo htmlspecialchars($waybill['loading_origin'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>مقصد تخلیه</small><strong><?php echo htmlspecialchars($waybill['discharge_destination'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>راننده اول</small><strong><?php echo htmlspecialchars($waybill['driver1_name'] ?? '-'); ?></strong></div>
-        <div class="info-item"><small>شماره پلاک</small><strong><?php echo htmlspecialchars($waybill['vehicle_plate'] ?? '-'); ?></strong></div>
-    </div>
-    <?php if ($waybill['description']): ?>
-        <div style="margin-top: 15px;"><small>توضیحات</small><div><?php echo nl2br(htmlspecialchars($waybill['description'])); ?></div></div>
+    
+    <!-- فایل ضمیمه با پیش‌نمایش -->
+    <?php if ($waybill['file_path']): ?>
+        <?php
+        $file_ext = strtolower(pathinfo($waybill['file_name'], PATHINFO_EXTENSION));
+        $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
+        $file_url = '/invoice-system-v2/' . $waybill['file_path'];
+        ?>
+        <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eef2f5;">
+            <small style="color: #7f8c8d;">📎 فایل ضمیمه</small>
+            <div class="file-preview">
+                <div class="thumbnail" onclick="openModal('<?php echo $file_url; ?>', '<?php echo $is_image ? 'image' : 'pdf'; ?>')">
+                    <?php if ($is_image): ?>
+                        <img src="<?php echo $file_url; ?>" alt="پیش‌نمایش">
+                    <?php else: ?>
+                        <div class="pdf-icon">📄</div>
+                    <?php endif; ?>
+                </div>
+                <div class="file-info">
+                    <div class="preview-hint">🔍 برای مشاهده در اندازه واقعی کلیک کنید</div>
+                    <a href="<?php echo $file_url; ?>" download class="file-link">📥 دانلود فایل</a>
+                </div>
+            </div>
+        </div>
     <?php endif; ?>
 </div>
 
+<!-- وضعیت در دست -->
 <div class="holder-box">
     <i class="fas fa-user-check" style="color: #3498db; margin-left: 10px;"></i>
-    <strong>در دست:</strong> 
+    <strong>📍 در دست:</strong> 
     <?php if ($waybill['holder_user_name']): ?>
-        <?php echo htmlspecialchars($waybill['holder_user_name']); ?>
+        👤 <?php echo htmlspecialchars($waybill['holder_user_name']); ?>
     <?php elseif ($waybill['holder_department_name']): ?>
-        <?php echo htmlspecialchars($waybill['holder_department_name']); ?> (بخش)
+        🏢 <?php echo htmlspecialchars($waybill['holder_department_name']); ?>
     <?php else: ?>
         هیچ
     <?php endif; ?>
 </div>
 
-<!-- فرم اقدامات (کشویی انتخابی) -->
+<!-- فرم اقدامات -->
 <?php if ($can_forward || $can_approve_reject): ?>
 <div class="action-form">
     <h3><i class="fas fa-bolt" style="color: #f39c12;"></i> اقدامات روی بارنامه</h3>
@@ -250,7 +296,6 @@ ob_start();
             </select>
         </div>
         
-        <!-- فیلدهای ارجاع (برای گزینه بررسی و پیگیری) -->
         <div id="forwardFields" style="display: none;">
             <div class="row-2col">
                 <div class="form-group">
@@ -274,9 +319,8 @@ ob_start();
             </div>
         </div>
         
-        <!-- فیلد توضیحات (همیشه نمایش داده می‌شود) -->
         <div class="form-group">
-            <label>توضیحات <span id="notesRequiredStar" class="required-star">*</span></label>
+            <label>📝 توضیحات <span id="notesRequiredStar" class="required-star">*</span></label>
             <textarea name="notes" id="actionNotes" rows="2" placeholder="توضیحات خود را وارد کنید..."></textarea>
         </div>
         
@@ -291,12 +335,9 @@ const actionSelect = document.getElementById('actionSelect');
 const forwardFields = document.getElementById('forwardFields');
 const actionNotes = document.getElementById('actionNotes');
 const notesRequiredStar = document.getElementById('notesRequiredStar');
-const submitBtn = document.getElementById('submitBtn');
 
 function toggleFields() {
     const selectedValue = actionSelect.value;
-    
-    // مخفی کردن فیلدهای ارجاع
     forwardFields.style.display = 'none';
     
     if (selectedValue === 'forward') {
@@ -322,8 +363,7 @@ function toggleFields() {
 
 actionSelect.addEventListener('change', toggleFields);
 
-// اعتبارسنجی قبل از ارسال
-submitBtn.addEventListener('click', function(e) {
+document.getElementById('submitBtn').addEventListener('click', function(e) {
     const selectedValue = actionSelect.value;
     
     if (selectedValue === '') {
@@ -340,66 +380,116 @@ submitBtn.addEventListener('click', function(e) {
             alert('لطفاً بخش یا شخص مقصد را انتخاب کنید');
             return false;
         }
+        if (actionNotes.value.trim() === '') {
+            e.preventDefault();
+            alert('لطفاً توضیحات را وارد کنید');
+            return false;
+        }
     }
     
-    if ((selectedValue === 'forward' || selectedValue === 'reject') && actionNotes.value.trim() === '') {
+    if (selectedValue === 'reject' && actionNotes.value.trim() === '') {
         e.preventDefault();
-        alert('لطفاً توضیحات را وارد کنید');
+        alert('لطفاً دلیل رد را وارد کنید');
         return false;
     }
 });
 
-// تنظیم اولیه
 toggleFields();
 </script>
 <?php endif; ?>
 
 <!-- تاریخچه ارجاع -->
 <div class="info-card">
-    <h3 style="margin-bottom: 15px;"><i class="fas fa-history" style="color: #3498db;"></i> تاریخچه ارجاع</h3>
+    <h3 style="margin-bottom: 15px;"><i class="fas fa-history" style="color: #3498db;"></i> 📜 تاریخچه ارجاع</h3>
     <?php if (empty($history)): ?>
-        <p style="color: #7f8c8d; text-align: center;">هیچ اقدامی ثبت نشده است.</p>
+        <p style="color: #7f8c8d; text-align: center; padding: 20px;">هیچ اقدامی ثبت نشده است.</p>
     <?php else: ?>
-        <table class="history-table">
-            <thead>
-                <tr>
-                    <th>زمان</th>
-                    <th>از</th>
-                    <th>به</th>
-                    <th>اقدام</th>
-                    <th>توضیحات</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($history as $h): ?>
-                <tr>
-                    <td style="white-space: nowrap;"><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?></td>
-                    <td><?php echo htmlspecialchars($h['from_name']); ?></td>
-                    <td>
-                        <?php 
-                        if ($h['to_name']) {
-                            echo '<span style="color:#27ae60;">👤 ' . htmlspecialchars($h['to_name']) . '</span>';
-                        } elseif ($h['to_department_name']) {
-                            echo '<span style="color:#3498db;">🏢 ' . htmlspecialchars($h['to_department_name']) . '</span>';
-                        } else {
-                            echo '-';
-                        }
-                        ?>
-                    </td>
-                    <td>
-                        <?php
-                        $action_icon = ['forward' => '🔄', 'approve' => '✅', 'reject' => '❌'];
-                        $action_text = ['forward' => 'ارجاع', 'approve' => 'تایید', 'reject' => 'رد'];
-                        echo ($action_icon[$h['action']] ?? '📌') . ' ' . ($action_text[$h['action']] ?? $h['action']);
-                        ?>
-                    </td>
-                    <td style="max-width: 250px; word-wrap: break-word;"><?php echo nl2br(htmlspecialchars($h['notes'] ?? '-')); ?></td>
-                </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
+        <div class="history-wrapper">
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th style="width: 110px;">زمان</th>
+                        <th style="width: 100px;">از</th>
+                        <th style="width: 100px;">به</th>
+                        <th style="width: 70px;">اقدام</th>
+                        <th>توضیحات</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($history as $h): ?>
+                    <tr>
+                        <td style="white-space: nowrap;"><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?></td>
+                        <td><?php echo htmlspecialchars($h['from_name']); ?></td>
+                        <td>
+                            <?php 
+                            if ($h['to_name']) {
+                                echo '👤 ' . htmlspecialchars($h['to_name']);
+                            } elseif ($h['to_department_name']) {
+                                echo '🏢 ' . htmlspecialchars($h['to_department_name']);
+                            } else {
+                                echo '-';
+                            }
+                            ?>
+                        </td>
+                        <td>
+                            <?php
+                            $action_class = '';
+                            $action_icon = '';
+                            if ($h['action'] == 'forward') { $action_class = 'action-forward'; $action_icon = '🔄'; $action_text = 'ارجاع'; }
+                            elseif ($h['action'] == 'approve') { $action_class = 'action-approve'; $action_icon = '✅'; $action_text = 'تایید'; }
+                            elseif ($h['action'] == 'reject') { $action_class = 'action-reject'; $action_icon = '❌'; $action_text = 'رد'; }
+                            else { $action_icon = '📌'; $action_text = $h['action']; }
+                            ?>
+                            <span class="action-badge <?php echo $action_class; ?>">
+                                <?php echo $action_icon . ' ' . $action_text; ?>
+                            </span>
+                        </td>
+                        <td style="max-width: 200px; word-wrap: break-word;"><?php echo nl2br(htmlspecialchars($h['notes'] ?? '-')); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
     <?php endif; ?>
 </div>
+
+<!-- مودال -->
+<div id="fileModal" class="modal" onclick="closeModal()">
+    <span class="close-modal" onclick="closeModal()">&times;</span>
+    <div class="modal-content" id="modalContent"></div>
+</div>
+
+<script>
+function openModal(fileUrl, type) {
+    const modal = document.getElementById('fileModal');
+    const modalContent = document.getElementById('modalContent');
+    
+    if (type === 'image') {
+        modalContent.innerHTML = '<img src="' + fileUrl + '" alt="تصویر بارنامه">';
+    } else if (type === 'pdf') {
+        modalContent.innerHTML = '<iframe src="' + fileUrl + '"></iframe>';
+    }
+    
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+}
+
+function closeModal() {
+    const modal = document.getElementById('fileModal');
+    const modalContent = document.getElementById('modalContent');
+    modal.style.display = 'none';
+    modalContent.innerHTML = '';
+    document.body.style.overflow = 'auto';
+}
+
+document.getElementById('fileModal').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+});
+</script>
 
 <?php
 $content = ob_get_clean();

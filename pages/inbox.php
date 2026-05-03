@@ -8,7 +8,7 @@ if (!isset($_SESSION['user_id'])) {
 }
 
 $user_id = $_SESSION['user_id'];
-$user_role_ids = $_SESSION['user_role_ids'] ?? [];
+// $user_role_ids = $_SESSION['user_role_ids'] ?? []; // کامنت شد - دیگر استفاده نمی‌شود
 
 $host = 'localhost';
 $dbname = 'invoice_system';
@@ -35,8 +35,14 @@ $base_sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_
              FROM documents d 
              LEFT JOIN companies c ON d.company_id = c.id 
              LEFT JOIN vendors v ON d.vendor_id = v.id 
-             WHERE d.type = 'invoice'";
-$params = [];
+             WHERE d.type = 'invoice'
+             AND (
+                 d.created_by = ?
+                 OR d.current_holder_user_id = ?
+                 OR (d.current_holder_department_id IS NOT NULL AND d.current_holder_department_id = ?)
+             )";
+
+$params = [$user_id, $user_id, $_SESSION['user_department_id'] ?? null];
 
 if ($filter_company) {
     $base_sql .= " AND d.company_id = ?";

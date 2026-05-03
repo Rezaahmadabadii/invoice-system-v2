@@ -32,8 +32,14 @@ $base_sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_
              FROM documents d 
              LEFT JOIN companies c ON d.company_id = c.id 
              LEFT JOIN vendors v ON d.vendor_id = v.id 
-             WHERE d.type = 'waybill'";
-$params = [];
+             WHERE d.type = 'waybill'
+             AND (
+                 d.created_by = ?
+                 OR d.current_holder_user_id = ?
+                 OR (d.current_holder_department_id IS NOT NULL AND d.current_holder_department_id = ?)
+             )";
+
+$params = [$_SESSION['user_id'], $_SESSION['user_id'], $_SESSION['user_department_id'] ?? null];
 
 if ($filter_company) {
     $base_sql .= " AND d.company_id = ?";
