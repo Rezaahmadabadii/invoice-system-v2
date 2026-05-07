@@ -34,7 +34,6 @@ $selected_month = $_GET['month'] ?? $current_month;
 $months = [1 => 'فروردین', 2 => 'اردیبهشت', 3 => 'خرداد', 4 => 'تیر', 5 => 'مرداد', 6 => 'شهریور', 7 => 'مهر', 8 => 'آبان', 9 => 'آذر', 10 => 'دی', 11 => 'بهمن', 12 => 'اسفند'];
 $years = range($current_year - 2, $current_year + 2);
 
-// فیلترهای دیگر
 $filter_company = $_GET['company'] ?? '';
 $filter_status = $_GET['status'] ?? '';
 $search = $_GET['search'] ?? '';
@@ -60,38 +59,38 @@ if ($selected_year && $selected_month) {
 }
 
 // کوئری اصلی با دسترسی‌های کاربر
-$base_sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
-                     holder_dep.name as holder_department_name,
-                     holder_user.full_name as holder_user_name
-             FROM documents d 
-             LEFT JOIN companies c ON d.company_id = c.id 
-             LEFT JOIN vendors v ON d.vendor_id = v.id
-             LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
-             LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
-             WHERE d.type = 'invoice'
-             AND d.created_by = ?
-             $date_condition";
+$sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
+               holder_dep.name as holder_department_name,
+               holder_user.full_name as holder_user_name
+        FROM documents d 
+        LEFT JOIN companies c ON d.company_id = c.id 
+        LEFT JOIN vendors v ON d.vendor_id = v.id
+        LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
+        LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
+        WHERE d.type = 'invoice'
+        AND d.created_by = ?
+        $date_condition";
 
 $params = array_merge([$user_id], $params);
 
 if ($filter_company) {
-    $base_sql .= " AND d.company_id = ?";
+    $sql .= " AND d.company_id = ?";
     $params[] = $filter_company;
 }
 if ($filter_status) {
-    $base_sql .= " AND d.status = ?";
+    $sql .= " AND d.status = ?";
     $params[] = $filter_status;
 }
 if ($search) {
-    $base_sql .= " AND (d.document_number LIKE ? OR d.title LIKE ? OR c.name LIKE ? OR v.name LIKE ?)";
+    $sql .= " AND (d.document_number LIKE ? OR d.title LIKE ? OR c.name LIKE ? OR v.name LIKE ?)";
     $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
 }
 
-$base_sql .= " ORDER BY d.created_at DESC";
-$stmt = $pdo->prepare($base_sql);
+$sql .= " ORDER BY d.created_at DESC";
+$stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $invoices = $stmt->fetchAll();
 
@@ -100,15 +99,6 @@ $total_invoices = count($invoices);
 $completed_invoices = count(array_filter($invoices, fn($i) => $i['status'] == 'approved'));
 $pending_invoices = count(array_filter($invoices, fn($i) => $i['status'] == 'pending'));
 $draft_count = count(array_filter($invoices, fn($i) => $i['status'] == 'draft'));
-
-$status_colors = [
-    'pending' => '#fef9e6',
-    'forwarded' => '#f39c12',
-    'approved' => '#2ecc71',
-    'rejected' => '#e74c3c',
-    'draft' => '#95a5a6',
-    'cancelled' => '#e74c3c'
-];
 
 $status_texts = [
     'pending' => '⏳ در انتظار',
@@ -136,26 +126,24 @@ ob_start();
         --text-muted: #64748b;
     }
     
-    /* انیمیشن چرخ‌دنده + حرکت به راست */
-    .coin-area {
-        display: inline-block;
-        margin-left: 10px;
-        vertical-align: middle;
-        overflow: hidden;
-        width: 30px;
+    /* انیمیشن سبد خرید - حرکت به راست و محو (مشابه کامیون) */
+    .cart-animation-area {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 15px;
+        overflow: visible;
+        min-height: 80px;
     }
-    .coin-icon {
-        font-size: 22px;
+    .cart-icon {
+        font-size: 32px;
         display: inline-block;
-        transition: all 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        transition: transform 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94), opacity 0.8s ease-out;
         cursor: pointer;
+        vertical-align: middle;
     }
-    .coin-spin-move {
-        animation: spinAndMove 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
-    }
-    @keyframes spinAndMove {
-        0% { transform: rotate(0deg) translateX(0); opacity: 1; }
-        100% { transform: rotate(360deg) translateX(50px); opacity: 0; }
+    .cart-slide-right {
+        transform: translateX(300px);
+        opacity: 0;
     }
     
     .stats-grid {
@@ -367,6 +355,9 @@ ob_start();
         font-size: 11px;
         text-decoration: none;
         transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
     }
     
     .action-btn.view { background: #e8f4fd; color: #3498db; }
@@ -377,6 +368,8 @@ ob_start();
     .action-btn.delete:hover { background: #e74c3c; color: white; }
     .action-btn.finalize { background: #fee8e8; color: #e74c3c; }
     .action-btn.finalize:hover { background: #e74c3c; color: white; }
+    .action-btn.file { background: #f8f9fa; border: 1px solid #e2e8f0; }
+    .action-btn.file:hover { background: #e2e8f0; transform: translateY(-1px); }
     
     .empty-state {
         text-align: center;
@@ -406,27 +399,29 @@ ob_start();
         .stats-grid { grid-template-columns: repeat(2, 1fr); }
         .filters-container { flex-direction: column; align-items: stretch; }
         .filters-container > * { width: 100%; }
+        .cart-animation-area { min-height: 100px; }
+        .cart-icon { font-size: 60px; }
+        .cart-slide-right { transform: translateX(200px); opacity: 0; }
     }
     
     @media (max-width: 480px) {
         .cards-list {
             grid-template-columns: 1fr;
         }
+        .cart-slide-right { transform: translateX(100px); opacity: 0; }
     }
 </style>
 
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
     <h1 style="color: #2c3e50; margin: 0; font-size: 22px;">📄 مدیریت فاکتورها</h1>
-    <div>
-        <div style="display: inline-block;">
-            <div class="coin-area">
-                <div class="coin-icon" id="coinIcon">➕</div>
-            </div>
-            <button type="button" id="createInvoiceBtn" class="btn-create">
+    <div style="display: flex; align-items: center; gap: 15px;">
+        <div style="display: inline-flex; align-items: center; gap: 10px;">
+            <div class="cart-icon" id="cartIcon" style="font-size: 28px; display: inline-block; cursor: pointer; line-height: 1;">🛒</div>
+            <button type="button" id="createInvoiceBtn" class="btn-create" style="display: inline-flex; align-items: center; gap: 8px;">
                 <i class="fas fa-plus"></i> فاکتور جدید
             </button>
         </div>
-        <a href="dashboard.php" style="background: #95a5a6; color: white; padding: 8px 18px; border-radius: 8px; text-decoration: none; font-size: 13px;">بازگشت</a>
+        <a href="dashboard.php" style="background: #95a5a6; color: white; padding: 8px 18px; border-radius: 8px; text-decoration: none; font-size: 13px; display: inline-flex; align-items: center;">بازگشت</a>
     </div>
 </div>
 
@@ -478,105 +473,110 @@ ob_start();
 </div>
 
 <div class="cards-list">
-    <?php foreach ($invoices as $inv): 
-        $isDraft = ($inv['status'] == 'draft');
-        $shamsi_date = jdate('Y/m/d', strtotime($inv['created_at']));
-        $holderText = !empty($inv['holder_user_name']) ? '👤 ' . htmlspecialchars($inv['holder_user_name']) : 
-                     (!empty($inv['holder_department_name']) ? '🏢 ' . htmlspecialchars($inv['holder_department_name']) : '📭 بدون متصدی');
-        $stepCreate = ($inv['status'] != 'draft') ? 'completed' : 'active';
-        $stepReview = ($inv['status'] == 'forwarded' || $inv['status'] == 'approved') ? 'completed' : ($inv['status'] == 'forwarded' ? 'active' : '');
-        $stepApprove = ($inv['status'] == 'approved') ? 'completed active' : '';
-    ?>
-    <div class="invoice-card">
-        <div class="card-status-bar status-bar-<?php echo $inv['status'] == 'draft' ? 'draft' : $inv['status']; ?>"></div>
-        <div class="card-content">
-            <div class="card-header">
-                <span class="doc-number"><i class="fas fa-file-alt"></i> <?php echo htmlspecialchars($inv['document_number']); ?></span>
-                <?php if ($isDraft): ?>
-                    <span class="draft-badge"><i class="fas fa-pen-fancy"></i> پیش‌نویس</span>
-                <?php endif; ?>
-            </div>
-            
-            <div class="card-title" title="<?php echo htmlspecialchars($inv['title']); ?>">
-                <?php echo htmlspecialchars(mb_substr($inv['title'], 0, 35)) . (mb_strlen($inv['title']) > 35 ? '...' : ''); ?>
-            </div>
-            
-            <div class="info-row">
-                <span class="info-label">💰 مبلغ</span>
-                <span class="info-value amount-value"><?php echo number_format($inv['amount'] ?? 0); ?> تومان</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">🏢 شرکت</span>
-                <span class="info-value"><?php echo htmlspecialchars($inv['company_name'] ?? '-'); ?></span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">🏪 فروشنده</span>
-                <span class="info-value"><?php echo htmlspecialchars($inv['vendor_name'] ?? '-'); ?></span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">📅 تاریخ</span>
-                <span class="info-value"><?php echo $shamsi_date; ?></span>
-            </div>
-            
-            <div class="holder-box">
-                <i class="fas fa-location-dot"></i> <strong>📍 در دست:</strong> <?php echo $holderText; ?>
-            </div>
-            
-            <div class="status-steps">
-                <div class="step-item <?php echo $stepCreate; ?>"><i class="fas fa-pen"></i> ایجاد</div>
-                <div class="step-item <?php echo $stepReview; ?>"><i class="fas fa-search"></i> بررسی</div>
-                <div class="step-item <?php echo $stepApprove; ?>"><i class="fas fa-check-circle"></i> تایید</div>
-            </div>
-            
-            <div class="card-actions">
-                <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات">
-                    <i class="fas fa-eye"></i>
-                </a>
-                <?php if (!empty($inv['file_path'])):
-                    $file_ext = strtolower(pathinfo($inv['file_path'], PATHINFO_EXTENSION));
-                    $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
-                    $is_pdf = ($file_ext == 'pdf');
-                    $file_icon = ($is_image) ? 'fa-image' : (($is_pdf) ? 'fa-file-pdf' : 'fa-file-alt');
-                    $file_color = ($is_image) ? '#27ae60' : (($is_pdf) ? '#e74c3c' : '#3498db');
-                ?>
-                    <button type="button" class="action-btn file" 
-                            data-file="<?php echo htmlspecialchars($inv['file_path']); ?>" 
-                            data-filename="<?php echo htmlspecialchars($inv['file_name'] ?? basename($inv['file_path'])); ?>"
-                            data-type="<?php echo $is_pdf ? 'pdf' : ($is_image ? 'image' : 'other'); ?>"
-                            style="color: <?php echo $file_color; ?>; background: <?php echo $file_color; ?>10;"
-                            onclick="openFileModal(this)" 
-                            title="مشاهده فایل">
-                        <i class="fas <?php echo $file_icon; ?>"></i>
-                    </button>
-                <?php endif; ?>
-                <?php if ($inv['created_by'] == $user_id): ?>
+    <?php if (empty($invoices)): ?>
+        <div class="empty-state"><i class="fas fa-file-invoice" style="font-size: 40px;"></i><p>هیچ فاکتوری یافت نشد</p></div>
+    <?php else: ?>
+        <?php foreach ($invoices as $inv): 
+            $isDraft = ($inv['status'] == 'draft');
+            $shamsi_date = jdate('Y/m/d', strtotime($inv['created_at']));
+            $holderText = !empty($inv['holder_user_name']) ? '👤 ' . htmlspecialchars($inv['holder_user_name']) : 
+                         (!empty($inv['holder_department_name']) ? '🏢 ' . htmlspecialchars($inv['holder_department_name']) : '📭 بدون متصدی');
+            $stepCreate = ($inv['status'] != 'draft') ? 'completed' : 'active';
+            $stepReview = ($inv['status'] == 'forwarded' || $inv['status'] == 'approved') ? 'completed' : ($inv['status'] == 'forwarded' ? 'active' : '');
+            $stepApprove = ($inv['status'] == 'approved') ? 'completed active' : '';
+        ?>
+        <div class="invoice-card">
+            <div class="card-status-bar status-bar-<?php echo $inv['status'] == 'draft' ? 'draft' : $inv['status']; ?>"></div>
+            <div class="card-content">
+                <div class="card-header">
+                    <span class="doc-number"><i class="fas fa-file-alt"></i> <?php echo htmlspecialchars($inv['document_number']); ?></span>
                     <?php if ($isDraft): ?>
-                        <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn finalize" title="تکمیل"><i class="fas fa-check-circle"></i> تکمیل</a>
-                    <?php else: ?>
-                        <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش"><i class="fas fa-edit"></i></a>
+                        <span class="draft-badge"><i class="fas fa-pen-fancy"></i> پیش‌نویس</span>
                     <?php endif; ?>
-                    <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')"><i class="fas fa-trash-alt"></i></a>
-                <?php endif; ?>
+                </div>
+                
+                <div class="card-title" title="<?php echo htmlspecialchars($inv['title']); ?>">
+                    <?php echo htmlspecialchars(mb_substr($inv['title'], 0, 35)) . (mb_strlen($inv['title']) > 35 ? '...' : ''); ?>
+                </div>
+                
+                <div class="info-row">
+                    <span class="info-label">💰 مبلغ</span>
+                    <span class="info-value amount-value"><?php echo number_format($inv['amount'] ?? 0); ?> تومان</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">🏢 شرکت</span>
+                    <span class="info-value"><?php echo htmlspecialchars($inv['company_name'] ?? '-'); ?></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">🏪 فروشنده</span>
+                    <span class="info-value"><?php echo htmlspecialchars($inv['vendor_name'] ?? '-'); ?></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">📅 تاریخ</span>
+                    <span class="info-value"><?php echo $shamsi_date; ?></span>
+                </div>
+                
+                <div class="holder-box">
+                    <i class="fas fa-location-dot"></i> <strong>📍 در دست:</strong> <?php echo $holderText; ?>
+                </div>
+                
+                <div class="status-steps">
+                    <div class="step-item <?php echo $stepCreate; ?>"><i class="fas fa-pen"></i> ایجاد</div>
+                    <div class="step-item <?php echo $stepReview; ?>"><i class="fas fa-search"></i> بررسی</div>
+                    <div class="step-item <?php echo $stepApprove; ?>"><i class="fas fa-check-circle"></i> تایید</div>
+                </div>
+                
+                <div class="card-actions">
+                    <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات"><i class="fas fa-eye"></i></a>
+                    <?php if (!empty($inv['file_path'])):
+                        $file_ext = strtolower(pathinfo($inv['file_path'], PATHINFO_EXTENSION));
+                        $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
+                        $is_pdf = ($file_ext == 'pdf');
+                        $file_icon = ($is_image) ? 'fa-image' : (($is_pdf) ? 'fa-file-pdf' : 'fa-file-alt');
+                        $file_color = ($is_image) ? '#27ae60' : (($is_pdf) ? '#e74c3c' : '#3498db');
+                    ?>
+                        <button type="button" class="action-btn file" 
+                                data-file="<?php echo htmlspecialchars($inv['file_path']); ?>" 
+                                data-filename="<?php echo htmlspecialchars($inv['file_name'] ?? basename($inv['file_path'])); ?>"
+                                data-type="<?php echo $is_pdf ? 'pdf' : ($is_image ? 'image' : 'other'); ?>"
+                                style="color: <?php echo $file_color; ?>; background: <?php echo $file_color; ?>10;"
+                                onclick="openFileModal(this)" 
+                                title="مشاهده فایل">
+                            <i class="fas <?php echo $file_icon; ?>"></i>
+                        </button>
+                    <?php endif; ?>
+                    <?php if ($inv['created_by'] == $user_id): ?>
+                        <?php if ($isDraft): ?>
+                            <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn finalize" title="تکمیل"><i class="fas fa-check-circle"></i> تکمیل</a>
+                        <?php else: ?>
+                            <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش"><i class="fas fa-edit"></i></a>
+                        <?php endif; ?>
+                        <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')"><i class="fas fa-trash-alt"></i></a>
+                    <?php endif; ?>
+                </div>
             </div>
         </div>
-    </div>
-    <?php endforeach; ?>
+        <?php endforeach; ?>
+    <?php endif; ?>
 </div>
 
 <script>
-// انیمیشن چرخ‌دنده + حرکت به راست
-const coinIcon = document.getElementById('coinIcon');
-const createBtn = document.getElementById('createInvoiceBtn');
-
-if (coinIcon && createBtn) {
-    createBtn.addEventListener('click', function(e) {
-        e.preventDefault();
-        coinIcon.classList.add('coin-spin-move');
-        setTimeout(function() {
-            window.location.href = 'invoice-create.php';
-        }, 800);
-    });
+// انیمیشن سبد خرید - حرکت به راست و محو (مشابه کامیون)
+function animateCartAndRedirect() {
+    var cartIcon = document.getElementById('cartIcon');
+    if (cartIcon) {
+        if (cartIcon.classList.contains('cart-slide-right')) return;
+        cartIcon.classList.add('cart-slide-right');
+        setTimeout(function() { window.location.href = 'invoice-create.php'; }, 800);
+    } else {
+        window.location.href = 'invoice-create.php';
+    }
 }
+
+document.getElementById('createInvoiceBtn')?.addEventListener('click', function(e) {
+    e.preventDefault();
+    animateCartAndRedirect();
+});
 
 function applyFilters() {
     let search = document.getElementById('searchInput').value;
@@ -597,7 +597,75 @@ document.getElementById('applyFilterBtn').addEventListener('click', applyFilters
 document.getElementById('searchInput').addEventListener('keypress', function(e) {
     if (e.key === 'Enter') applyFilters();
 });
+
+// مودال فایل
+function openFileModal(button) {
+    const filePath = button.getAttribute('data-file');
+    const fileName = button.getAttribute('data-filename') || 'فایل';
+    const fileType = button.getAttribute('data-type');
+    const modal = document.getElementById('fileModal');
+    const modalBody = document.getElementById('fileModalBody');
+    
+    if (!filePath) {
+        modalBody.innerHTML = '<div class="file-loading">فایل یافت نشد</div>';
+        modal.style.display = 'block';
+        return;
+    }
+    
+    const fileUrl = '/invoice-system-v2/' + filePath;
+    
+    if (fileType === 'pdf') {
+        window.open(fileUrl, '_blank');
+        return;
+    }
+    
+    if (fileType === 'image') {
+        modalBody.innerHTML = '<div class="file-loading">در حال بارگذاری...</div>';
+        modal.style.display = 'block';
+        document.body.style.overflow = 'hidden';
+        
+        const img = new Image();
+        img.onload = function() {
+            modalBody.innerHTML = `<img src="${fileUrl}" alt="${fileName}">`;
+        };
+        img.onerror = function() {
+            modalBody.innerHTML = `<div style="text-align: center; padding: 40px;">
+                <i class="fas fa-exclamation-triangle" style="font-size: 48px; color: #e74c3c; margin-bottom: 16px; display: block;"></i>
+                <p>خطا در بارگذاری تصویر</p>
+                <a href="${fileUrl}" download class="action-btn view" style="display: inline-flex; margin-top: 16px;">
+                    <i class="fas fa-download"></i> دانلود فایل
+                </a>
+            </div>`;
+        };
+        img.src = fileUrl;
+    } else {
+        modalBody.innerHTML = `<div style="text-align: center; padding: 40px;">
+            <i class="fas fa-file-alt" style="font-size: 48px; color: #64748b; margin-bottom: 16px; display: block;"></i>
+            <p>پیش‌نمایش برای این نوع فایل امکان‌پذیر نیست</p>
+            <a href="${fileUrl}" download class="action-btn view" style="display: inline-flex; margin-top: 16px;">
+                <i class="fas fa-download"></i> دانلود فایل
+            </a>
+        </div>`;
+        modal.style.display = 'block';
+        document.body.style.overflow = 'hidden';
+    }
+}
+
+function closeFileModal(event) {
+    const modal = document.getElementById('fileModal');
+    if (event && event.target !== modal && !event.target.classList.contains('file-modal-close')) {
+        return;
+    }
+    modal.style.display = 'none';
+    document.body.style.overflow = 'auto';
+    document.getElementById('fileModalBody').innerHTML = '<div class="file-loading">در حال بارگذاری...</div>';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeFileModal();
+});
 </script>
+
 <!-- مودال نمایش فایل -->
 <div id="fileModal" class="file-modal" onclick="closeFileModal(event)">
     <div class="file-modal-content" onclick="event.stopPropagation()">
@@ -636,14 +704,8 @@ document.getElementById('searchInput').addEventListener('keypress', function(e) 
     }
     
     @keyframes modalFadeIn {
-        from {
-            opacity: 0;
-            transform: scale(0.95);
-        }
-        to {
-            opacity: 1;
-            transform: scale(1);
-        }
+        from { opacity: 0; transform: scale(0.95); }
+        to { opacity: 1; transform: scale(1); }
     }
     
     .file-modal-close {
@@ -720,17 +782,6 @@ document.getElementById('searchInput').addEventListener('keypress', function(e) 
         to { transform: rotate(360deg); }
     }
     
-    /* دکمه فایل در کارت */
-    .action-btn.file {
-        background: #f8f9fa;
-        border: 1px solid #e2e8f0;
-    }
-    
-    .action-btn.file:hover {
-        background: #e2e8f0;
-        transform: translateY(-1px);
-    }
-    
     @media (max-width: 768px) {
         .file-modal-content {
             width: 95%;
@@ -746,80 +797,6 @@ document.getElementById('searchInput').addEventListener('keypress', function(e) 
     }
 </style>
 
-<script>
-function openFileModal(button) {
-    const filePath = button.getAttribute('data-file');
-    const fileName = button.getAttribute('data-filename') || 'فایل';
-    const fileType = button.getAttribute('data-type');
-    const modal = document.getElementById('fileModal');
-    const modalBody = document.getElementById('fileModalBody');
-    
-    if (!filePath) {
-        modalBody.innerHTML = '<div class="file-loading">فایل یافت نشد</div>';
-        modal.style.display = 'block';
-        return;
-    }
-    
-    // ساخت آدرس کامل فایل
-    const fileUrl = '/invoice-system-v2/' + filePath;
-    
-    if (fileType === 'pdf') {
-        // برای PDF: در تب جدید باز شود
-        window.open(fileUrl, '_blank');
-        return;
-    }
-    
-    if (fileType === 'image') {
-        // برای تصاویر: در مودال نمایش داده شود
-        modalBody.innerHTML = `<div class="file-loading">در حال بارگذاری...</div>`;
-        modal.style.display = 'block';
-        document.body.style.overflow = 'hidden';
-        
-        const img = new Image();
-        img.onload = function() {
-            modalBody.innerHTML = `<img src="${fileUrl}" alt="${fileName}">`;
-        };
-        img.onerror = function() {
-            modalBody.innerHTML = `<div style="text-align: center; padding: 40px;">
-                <i class="fas fa-exclamation-triangle" style="font-size: 48px; color: #e74c3c; margin-bottom: 16px; display: block;"></i>
-                <p>خطا در بارگذاری تصویر</p>
-                <a href="${fileUrl}" download class="action-btn view" style="display: inline-flex; margin-top: 16px;">
-                    <i class="fas fa-download"></i> دانلود فایل
-                </a>
-            </div>`;
-        };
-        img.src = fileUrl;
-    } else {
-        // سایر فایل‌ها: پیام + دکمه دانلود
-        modalBody.innerHTML = `<div style="text-align: center; padding: 40px;">
-            <i class="fas fa-file-alt" style="font-size: 48px; color: #64748b; margin-bottom: 16px; display: block;"></i>
-            <p>پیش‌نمایش برای این نوع فایل امکان‌پذیر نیست</p>
-            <a href="${fileUrl}" download class="action-btn view" style="display: inline-flex; margin-top: 16px;">
-                <i class="fas fa-download"></i> دانلود فایل
-            </a>
-        </div>`;
-        modal.style.display = 'block';
-        document.body.style.overflow = 'hidden';
-    }
-}
-
-function closeFileModal(event) {
-    const modal = document.getElementById('fileModal');
-    if (event && event.target !== modal && !event.target.classList.contains('file-modal-close')) {
-        return;
-    }
-    modal.style.display = 'none';
-    document.body.style.overflow = 'auto';
-    document.getElementById('fileModalBody').innerHTML = '<div class="file-loading">در حال بارگذاری...</div>';
-}
-
-// بستن مودال با کلید Escape
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-        closeFileModal();
-    }
-});
-</script>
 <?php
 $content = ob_get_clean();
 require_once __DIR__ . '/../templates/layouts/dashboard.php';
