@@ -978,46 +978,48 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
 
-// ========== به‌روزرسانی شمارنده‌ها ==========
+// ========== به‌روزرسانی شمارنده‌ها و تغییر وضعیت سند ==========
 function updateCounters() {
+    // ارسال درخواست با mark_as_viewed = true و doc_id
     fetch('/invoice-system-v2/ajax/update_counter.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'waybill' })
+        body: JSON.stringify({ 
+            type: 'waybill', 
+            mark_as_viewed: true, 
+            doc_id: <?php echo $id; ?> 
+        })
     })
     .then(response => response.json())
     .then(data => {
-        if (data.invoice_count !== undefined) {
-            const badge = document.getElementById('invoiceBadge');
-            if (badge) {
-                if (data.invoice_count > 0) {
-                    badge.textContent = data.invoice_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
+        // به‌روزرسانی badge فاکتور
+        const invoiceBadge = document.getElementById('invoiceBadge');
+        if (invoiceBadge) {
+            if (data.invoice_count > 0) {
+                invoiceBadge.textContent = data.invoice_count;
+                invoiceBadge.style.display = 'inline-block';
+            } else {
+                invoiceBadge.style.display = 'none';
             }
         }
-        if (data.waybill_count !== undefined) {
-            const badge = document.getElementById('waybillBadge');
-            if (badge) {
-                if (data.waybill_count > 0) {
-                    badge.textContent = data.waybill_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
+        // به‌روزرسانی badge بارنامه
+        const waybillBadge = document.getElementById('waybillBadge');
+        if (waybillBadge) {
+            if (data.waybill_count > 0) {
+                waybillBadge.textContent = data.waybill_count;
+                waybillBadge.style.display = 'inline-block';
+            } else {
+                waybillBadge.style.display = 'none';
             }
         }
-        if (data.tax_count !== undefined) {
-            const badge = document.getElementById('taxBadge');
-            if (badge) {
-                if (data.tax_count > 0) {
-                    badge.textContent = data.tax_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
+        // به‌روزرسانی badge مالیاتی
+        const taxBadge = document.getElementById('taxBadge');
+        if (taxBadge) {
+            if (data.tax_count > 0) {
+                taxBadge.textContent = data.tax_count;
+                taxBadge.style.display = 'inline-block';
+            } else {
+                taxBadge.style.display = 'none';
             }
         }
     })

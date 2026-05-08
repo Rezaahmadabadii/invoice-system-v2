@@ -901,48 +901,72 @@ document.addEventListener('keydown', function(e) {
 });
 
 // ========== به‌روزرسانی شمارنده‌ها ==========
+<script>
+function openModal(fileUrl, type) {
+    const modal = document.getElementById('fileModal');
+    const modalContent = document.getElementById('modalContent');
+    if (type === 'image') {
+        modalContent.innerHTML = '<img src="' + fileUrl + '" alt="تصویر فاکتور">';
+    } else if (type === 'pdf') {
+        modalContent.innerHTML = '<iframe src="' + fileUrl + '"></iframe>';
+    }
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+}
+
+function closeModal() {
+    const modal = document.getElementById('fileModal');
+    const modalContent = document.getElementById('modalContent');
+    modal.style.display = 'none';
+    modalContent.innerHTML = '';
+    document.body.style.overflow = 'auto';
+}
+
+document.getElementById('fileModal').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+});
+
+// ========== به‌روزرسانی شمارنده‌ها و تغییر وضعیت سند ==========
 function updateCounters() {
     fetch('/invoice-system-v2/ajax/update_counter.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'invoice' })
+        body: JSON.stringify({ 
+            type: 'invoice', 
+            mark_as_viewed: true, 
+            doc_id: <?php echo $id; ?> 
+        })
     })
     .then(response => response.json())
     .then(data => {
-        // به‌روزرسانی شمارنده فاکتورها
-        if (data.invoice_count !== undefined) {
-            const badge = document.getElementById('invoiceBadge');
-            if (badge) {
-                if (data.invoice_count > 0) {
-                    badge.textContent = data.invoice_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
+        const invoiceBadge = document.getElementById('invoiceBadge');
+        if (invoiceBadge) {
+            if (data.invoice_count > 0) {
+                invoiceBadge.textContent = data.invoice_count;
+                invoiceBadge.style.display = 'inline-block';
+            } else {
+                invoiceBadge.style.display = 'none';
             }
         }
-        // به‌روزرسانی شمارنده بارنامه‌ها
-        if (data.waybill_count !== undefined) {
-            const badge = document.getElementById('waybillBadge');
-            if (badge) {
-                if (data.waybill_count > 0) {
-                    badge.textContent = data.waybill_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
+        const waybillBadge = document.getElementById('waybillBadge');
+        if (waybillBadge) {
+            if (data.waybill_count > 0) {
+                waybillBadge.textContent = data.waybill_count;
+                waybillBadge.style.display = 'inline-block';
+            } else {
+                waybillBadge.style.display = 'none';
             }
         }
-        // به‌روزرسانی شمارنده مودیان
-        if (data.tax_count !== undefined) {
-            const badge = document.getElementById('taxBadge');
-            if (badge) {
-                if (data.tax_count > 0) {
-                    badge.textContent = data.tax_count;
-                    badge.style.display = 'inline-block';
-                } else {
-                    badge.style.display = 'none';
-                }
+        const taxBadge = document.getElementById('taxBadge');
+        if (taxBadge) {
+            if (data.tax_count > 0) {
+                taxBadge.textContent = data.tax_count;
+                taxBadge.style.display = 'inline-block';
+            } else {
+                taxBadge.style.display = 'none';
             }
         }
     })
