@@ -1,3 +1,64 @@
+<?php
+require_once __DIR__ . '/../../app/Helpers/functions.php';
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// ========== دریافت تعداد اسناد در انتظار اقدام برای کاربر جاری ==========
+$user_id = $_SESSION['user_id'] ?? 0;
+$user_department_id = $_SESSION['user_department_id'] ?? null;
+
+$invoice_count = 0;
+$waybill_count = 0;
+$tax_count = 0;
+
+if ($user_id > 0) {
+    try {
+        $host = 'localhost';
+        $dbname = 'invoice_system';
+        $username_db = 'root';
+        $password_db = '';
+        
+        $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8mb4", $username_db, $password_db);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        // شمارش فاکتورها
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) FROM documents 
+            WHERE type = 'invoice' 
+            AND status IN ('pending', 'forwarded')
+            AND (current_holder_user_id = ? OR current_holder_department_id = ?)
+        ");
+        $stmt->execute([$user_id, $user_department_id]);
+        $invoice_count = (int)$stmt->fetchColumn();
+        
+        // شمارش بارنامه‌ها
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) FROM documents 
+            WHERE type = 'waybill' 
+            AND status IN ('pending', 'forwarded')
+            AND (current_holder_user_id = ? OR current_holder_department_id = ?)
+        ");
+        $stmt->execute([$user_id, $user_department_id]);
+        $waybill_count = (int)$stmt->fetchColumn();
+        
+        // شمارش اسناد مالیاتی
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) FROM documents 
+            WHERE type = 'tax' 
+            AND status IN ('pending', 'forwarded')
+            AND (current_holder_user_id = ? OR current_holder_department_id = ?)
+        ");
+        $stmt->execute([$user_id, $user_department_id]);
+        $tax_count = (int)$stmt->fetchColumn();
+    } catch(PDOException $e) {
+        $invoice_count = 0;
+        $waybill_count = 0;
+        $tax_count = 0;
+    }
+}
+?>
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -6,370 +67,452 @@
     <title><?php echo $page_title ?? 'پنل مدیریت هلدینگ'; ?></title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        *{margin:0; padding:0; box-sizing:border-box; font-family:Tahoma, Arial, sans-serif;}
-        body{background:#f5f7fa; display:flex;}
-        
-        /* سایدبار */
-        .sidebar{
-            width:280px; background:linear-gradient(135deg, #2c3e50, #3498db); color:white; 
-            min-height:100vh; padding:20px; position:fixed; right:0; top:0;
-            box-shadow:-5px 0 20px rgba(0,0,0,0.1);
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Vazirmatn', 'Tahoma', system-ui, sans-serif;
         }
         
-        .sidebar-header{
-            display:flex; justify-content:space-between; align-items:center; 
-            padding-bottom:20px; border-bottom:1px solid rgba(255,255,255,0.2);
+        body {
+            background: linear-gradient(145deg, #f0f4f8 0%, #e2e8f0 100%);
+            display: flex;
+            min-height: 100vh;
         }
         
-        .logo{display:flex; align-items:center; gap:10px; font-size:20px; font-weight:bold;}
-        .close-btn{display:none; background:none; border:none; color:white; font-size:20px; cursor:pointer;}
-        
-        .sidebar-nav ul{list-style:none; margin-top:20px;}
-        .sidebar-nav li{margin-bottom:5px;}
-        .sidebar-nav a{
-            display:flex; align-items:center; gap:12px; padding:12px 15px; 
-            color:white; text-decoration:none; border-radius:8px; transition:all 0.3s;
-        }
-        .sidebar-nav a:hover, .sidebar-nav .active>a{background:rgba(255,255,255,0.2);}
-        
-        .dropdown-toggle .arrow{margin-right:auto; transition:transform 0.3s;}
-        .dropdown.open .dropdown-toggle .arrow{transform:rotate(-180deg);}
-        .dropdown-menu{
-            list-style:none; max-height:0; overflow:hidden; transition:max-height 0.3s;
-            margin-right:20px;
-        }
-        .dropdown.open .dropdown-menu{max-height:300px;}
-        .dropdown-menu a{padding:10px 15px 10px 30px; font-size:13px;}
-        
-        .badge{
-            background:#e74c3c; color:white; padding:2px 6px; border-radius:10px; 
-            font-size:11px; margin-right:auto;
+        /* ========== سایدبار ========== */
+        .sidebar {
+            width: 280px;
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(14px);
+            border-left: 1px solid rgba(0, 0, 0, 0.05);
+            box-shadow: -4px 0 20px rgba(0, 0, 0, 0.03);
+            min-height: 100vh;
+            padding: 20px 16px;
+            position: fixed;
+            right: 0;
+            top: 0;
+            transition: all 0.3s ease;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
         }
         
-        .sidebar-footer{
-            display:flex; align-items:center; gap:10px; margin-top:20px; 
-            padding-top:20px; border-top:1px solid rgba(255,255,255,0.2);
+        .sidebar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
         }
         
-        .user-profile{display:flex; align-items:center; gap:10px; flex:1;}
-        .user-profile img{width:40px; height:40px; border-radius:50%;}
-        .user-info h4{font-size:14px; margin-bottom:3px;}
-        .user-info p{font-size:12px; opacity:0.8;}
-        
-        .logout-btn{
-            background:rgba(255,255,255,0.2); border:none; color:white; 
-            width:36px; height:36px; border-radius:50%; cursor:pointer;
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         
-        /* محتوای اصلی */
-        .main-content{flex:1; margin-right:280px; padding:20px;}
-        
-        /* هدر */
-        .top-header{
-            background:white; padding:15px 25px; border-radius:12px; 
-            display:flex; align-items:center; gap:20px; margin-bottom:25px;
-            box-shadow:0 2px 10px rgba(0,0,0,0.05);
+        .logo-icon {
+            width: 38px;
+            height: 38px;
+            background: linear-gradient(145deg, #3b82f6, #8b5cf6);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         
-        .menu-toggle{display:none; background:none; border:none; font-size:20px; cursor:pointer;}
-        
-        .search-box{
-            flex:1; display:flex; align-items:center; background:#f5f7fa;
-            padding:8px 15px; border-radius:30px; max-width:400px;
-        }
-        .search-box i{color:#999; margin-left:10px;}
-        .search-box input{flex:1; border:none; background:none; outline:none;}
-        
-        .header-actions{display:flex; gap:15px;}
-        .header-btn{
-            background:none; border:none; font-size:18px; color:#666; 
-            position:relative; width:36px; height:36px; border-radius:50%; cursor:pointer;
-        }
-        .header-btn:hover{background:#f5f7fa;}
-        .notification-dot{
-            position:absolute; top:5px; left:10px; width:8px; height:8px;
-            background:#e74c3c; border-radius:50%;
+        .logo-icon i {
+            font-size: 20px;
+            color: white;
         }
         
-        /* عنوان صفحه */
-        .page-title{margin-bottom:25px;}
-        .page-title h1{font-size:28px; color:#2c3e50; margin-bottom:5px;}
-        .page-title p{color:#7f8c8d;}
-        
-        /* کارت‌های آمار */
-        .stats-grid{
-            display:grid; grid-template-columns:repeat(4,1fr); gap:20px; margin-bottom:30px;
+        .logo-text {
+            font-size: 16px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #1e293b, #3b82f6);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
         }
         
-        .stat-card{
-            background:white; border-radius:12px; padding:20px; display:flex;
-            align-items:center; gap:15px; box-shadow:0 2px 10px rgba(0,0,0,0.05);
+        .close-btn {
+            display: none;
+            background: rgba(0, 0, 0, 0.05);
+            border: none;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            color: #64748b;
+            cursor: pointer;
         }
         
-        .stat-icon{
-            width:60px; height:60px; border-radius:12px; display:flex;
-            align-items:center; justify-content:center; font-size:24px; color:white;
-        }
-        .stat-icon.blue{background:linear-gradient(135deg,#3498db,#2980b9);}
-        .stat-icon.green{background:linear-gradient(135deg,#2ecc71,#27ae60);}
-        .stat-icon.orange{background:linear-gradient(135deg,#f39c12,#e67e22);}
-        .stat-icon.purple{background:linear-gradient(135deg,#9b59b6,#8e44ad);}
-        
-        .stat-info h3{font-size:14px; color:#7f8c8d; margin-bottom:5px;}
-        .stat-info p{font-size:24px; font-weight:bold; color:#2c3e50; margin-bottom:5px;}
-        
-        .stat-change{font-size:12px; display:flex; align-items:center; gap:3px;}
-        .stat-change.positive{color:#2ecc71;}
-        .stat-change.negative{color:#e74c3c;}
-        
-        /* گرید محتوا */
-        .content-grid{
-            display:grid; grid-template-columns:repeat(auto-fit,minmax(400px,1fr)); gap:20px;
+        .user-profile-top {
+            background: linear-gradient(135deg, #e0f2fe, #dbeafe);
+            border-radius: 20px;
+            padding: 16px 14px;
+            margin-bottom: 24px;
+            text-align: center;
         }
         
-        /* کارت‌های شیشه‌ای */
-        .glass-card{
-            background:white; border-radius:12px; padding:20px; 
-            box-shadow:0 2px 10px rgba(0,0,0,0.05); margin-bottom:20px;
+        .user-avatar {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(145deg, #3b82f6, #8b5cf6);
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 12px auto;
+            box-shadow: 0 6px 14px rgba(59, 130, 246, 0.25);
         }
         
-        .card-header{
-            display:flex; justify-content:space-between; align-items:center; 
-            margin-bottom:20px; padding-bottom:10px; border-bottom:1px solid #ecf0f1;
+        .user-avatar i {
+            font-size: 28px;
+            color: white;
         }
         
-        .card-header h2{font-size:16px; color:#2c3e50; display:flex; align-items:center; gap:8px;}
-        .btn-secondary{
-            background:#ecf0f1; border:none; padding:6px 12px; border-radius:6px;
-            color:#2c3e50; font-size:12px; cursor:pointer;
+        .user-name {
+            font-size: 15px;
+            font-weight: 700;
+            color: #1e293b;
+            margin-bottom: 4px;
         }
         
-        /* جدول */
-        .table-container{overflow-x:auto;}
-        .data-table{width:100%; border-collapse:collapse;}
-        .data-table th{
-            text-align:right; padding:12px; background:#f8f9fa; 
-            color:#2c3e50; font-size:12px; font-weight:600;
-        }
-        .data-table td{padding:12px; border-bottom:1px solid #ecf0f1; font-size:13px;}
-        
-        .status{
-            display:inline-block; padding:3px 8px; border-radius:4px; font-size:11px; font-weight:600;
-        }
-        .status.success{background:#d4edda; color:#155724;}
-        .status.pending{background:#fff3cd; color:#856404;}
-        .status.cancelled{background:#f8d7da; color:#721c24;}
-        
-        /* محصولات */
-        .products-list{display:flex; flex-direction:column; gap:10px;}
-        .product-item{
-            display:flex; align-items:center; gap:10px; padding:10px;
-            background:#f8f9fa; border-radius:8px;
-        }
-        .product-item img{width:50px; height:50px; border-radius:8px;}
-        .product-info{flex:1;}
-        .product-info h4{font-size:14px; margin-bottom:3px;}
-        .product-info p{font-size:12px; color:#7f8c8d;}
-        
-        /* عملیات سریع */
-        .quick-actions{display:grid; grid-template-columns:repeat(2,1fr); gap:10px;}
-        .action-btn{
-            display:flex; flex-direction:column; align-items:center; gap:5px;
-            padding:15px; background:#f8f9fa; border:none; border-radius:8px;
-            cursor:pointer; transition:all 0.3s;
-        }
-        .action-btn:hover{background:#3498db; color:white;}
-        .action-btn i{font-size:20px;}
-        
-        /* فعالیت‌ها */
-        .activities-list{display:flex; flex-direction:column; gap:10px;}
-        .activity-item{display:flex; align-items:center; gap:10px; padding:10px; background:#f8f9fa; border-radius:8px;}
-        .activity-icon{
-            width:36px; height:36px; border-radius:8px; display:flex;
-            align-items:center; justify-content:center; color:white; font-size:14px;
-        }
-        .activity-icon.blue{background:#3498db;}
-        .activity-icon.green{background:#2ecc71;}
-        .activity-icon.orange{background:#f39c12;}
-        .activity-icon.purple{background:#9b59b6;}
-        
-        .activity-info h4{font-size:13px; margin-bottom:3px;}
-        .activity-info p{font-size:12px; color:#7f8c8d;}
-        
-        /* چارت */
-        .stats-chart{padding:20px 0;}
-        .chart-bars{display:flex; align-items:flex-end; gap:15px; height:150px;}
-        .chart-bar-item{flex:1; display:flex; flex-direction:column; align-items:center; gap:5px;}
-        .chart-bar{width:100%; background:linear-gradient(to top,#3498db,#2980b9); border-radius:5px 5px 0 0;}
-        
-        /* مشتریان */
-        .customers-list{display:flex; flex-direction:column; gap:10px;}
-        .customer-item{display:flex; align-items:center; gap:10px; padding:10px; background:#f8f9fa; border-radius:8px;}
-        .customer-item img{width:40px; height:40px; border-radius:50%;}
-        .customer-info{flex:1;}
-        .customer-info h4{font-size:13px; margin-bottom:3px;}
-        .customer-info p{font-size:11px; color:#7f8c8d;}
-        .customer-badge{
-            padding:3px 8px; border-radius:4px; font-size:11px; font-weight:600;
-        }
-        .customer-badge i{color:#f1c40f;}
-        
-        /* اعلان‌ها */
-        .notification-count{background:#e74c3c; color:white; padding:2px 8px; border-radius:10px; font-size:12px;}
-        .notifications-list{display:flex; flex-direction:column; gap:10px;}
-        .notification-item{
-            display:flex; align-items:flex-start; gap:10px; padding:10px;
-            background:#f8f9fa; border-radius:8px; opacity:0.8;
-        }
-        .notification-item.unread{opacity:1; background:#e8f4fd;}
-        .notification-icon{
-            width:32px; height:32px; border-radius:8px; display:flex;
-            align-items:center; justify-content:center; color:white; font-size:14px;
-        }
-        .notification-info{flex:1;}
-        .notification-info h4{font-size:12px; margin-bottom:3px;}
-        .notification-info p{font-size:11px; color:#7f8c8d; margin-bottom:3px;}
-        .notification-time{font-size:10px; color:#95a5a6;}
-        
-        /* خلاصه درآمد */
-        .revenue-summary{display:flex; flex-direction:column; gap:10px;}
-        .revenue-item{padding:10px; background:#f8f9fa; border-radius:8px;}
-        .revenue-label{font-size:12px; color:#7f8c8d; margin-bottom:3px;}
-        .revenue-value{font-size:16px; font-weight:bold; color:#2c3e50;}
-        .revenue-change{font-size:11px; margin-top:3px;}
-        .revenue-change.positive{color:#2ecc71;}
-        
-        /* اورلی */
-        .overlay{display:none;}
-        
-        @media(max-width:1200px){
-            .stats-grid{grid-template-columns:repeat(2,1fr);}
+        .user-role {
+            font-size: 11px;
+            color: #64748b;
+            margin-bottom: 12px;
         }
         
-        @media(max-width:992px){
-            .sidebar{transform:translateX(100%);}
-            .sidebar.active{transform:translateX(0);}
-            .close-btn{display:block;}
-            .menu-toggle{display:block;}
-            .main-content{margin-right:0;}
+        .logout-btn-top {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 30px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            text-decoration: none;
         }
         
-        @media(max-width:768px){
-            .stats-grid{grid-template-columns:1fr;}
-            .content-grid{grid-template-columns:1fr;}
-            .search-box{display:none;}
+        .logout-btn-top:hover {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .sidebar-nav {
+            flex: 1;
+        }
+        
+        .sidebar-nav ul {
+            list-style: none;
+        }
+        
+        .sidebar-nav li {
+            margin-bottom: 4px;
+        }
+        
+        .sidebar-nav a {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            color: #334155;
+            text-decoration: none;
+            border-radius: 12px;
+            transition: all 0.2s ease;
+            font-size: 13px;
+            font-weight: 500;
+            text-align: right;
+        }
+        
+        .sidebar-nav a i {
+            width: 22px;
+            font-size: 16px;
+            color: #94a3b8;
+            transition: all 0.2s;
+            text-align: center;
+        }
+        
+        .sidebar-nav a span {
+            flex: 1;
+            text-align: right;
+        }
+        
+        .sidebar-nav a:hover {
+            background: rgba(59, 130, 246, 0.08);
+            color: #3b82f6;
+        }
+        
+        .sidebar-nav a:hover i {
+            color: #3b82f6;
+        }
+        
+        .sidebar-nav .active > a {
+            background: linear-gradient(95deg, rgba(59, 130, 246, 0.12), rgba(139, 92, 246, 0.06));
+            color: #3b82f6;
+            border-right: 3px solid #3b82f6;
+        }
+        
+        .sidebar-nav .active > a i {
+            color: #3b82f6;
+        }
+        
+        .dropdown-toggle {
+            justify-content: space-between;
+        }
+        
+        .dropdown-toggle .arrow {
+            transition: transform 0.3s ease;
+            font-size: 11px;
+            opacity: 0.6;
+            margin-right: auto;
+        }
+        
+        .dropdown.open .dropdown-toggle .arrow {
+            transform: rotate(-180deg);
+        }
+        
+        .dropdown-menu {
+            list-style: none;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+            margin-right: 36px;
+        }
+        
+        .dropdown.open .dropdown-menu {
+            max-height: 350px;
+        }
+        
+        .dropdown-menu a {
+            padding: 8px 14px;
+            font-size: 12px;
+        }
+        
+        .badge {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+            padding: 2px 8px;
+            border-radius: 20px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-right: auto;
+        }
+        
+        .badge.orange {
+            background: rgba(245, 158, 11, 0.15);
+            color: #f59e0b;
+        }
+        
+        .sidebar-footer {
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(0, 0, 0, 0.06);
+            text-align: center;
+        }
+        
+        .footer-logo {
+            margin-bottom: 8px;
+        }
+        
+        .footer-logo img {
+            max-width: 80px;
+            height: auto;
+            opacity: 0.6;
+            transition: opacity 0.3s;
+        }
+        
+        .footer-logo img:hover {
+            opacity: 1;
+        }
+        
+        .copyright {
+            font-size: 11px;
+            color: #94a3b8;
+            margin-bottom: 6px;
+        }
+        
+        .developer {
+            font-size: 10px;
+            color: #cbd5e1;
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid rgba(0, 0, 0, 0.04);
+        }
+        
+        .main-content {
+            flex: 1;
+            margin-right: 280px;
+            padding: 24px 28px;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .top-header {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            margin-bottom: 28px;
+        }
+        
+        .menu-toggle {
+            display: none;
+            background: rgba(0, 0, 0, 0.05);
+            border: none;
+            width: 42px;
+            height: 42px;
+            border-radius: 12px;
+            font-size: 20px;
+            color: #334155;
+            cursor: pointer;
+        }
+        
+        .overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(2px);
+            z-index: 99;
+        }
+        
+        .overlay.active {
+            display: block;
+        }
+        
+        @media (max-width: 992px) {
+            .sidebar {
+                transform: translateX(100%);
+            }
+            .sidebar.active {
+                transform: translateX(0);
+            }
+            .close-btn {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .menu-toggle {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .top-header {
+                justify-content: space-between;
+            }
+            .main-content {
+                margin-right: 0;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .main-content {
+                padding: 16px;
+            }
         }
     </style>
 </head>
 <body>
-    <!-- سایدبار -->
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <div class="logo">
-                <i class="fas fa-building"></i>
-                <span>کیهان راه شرق</span>
+                <div class="logo-icon">
+                    <i class="fas fa-building"></i>
+                </div>
+                <div class="logo-text">کیهان راه شرق</div>
             </div>
             <button class="close-btn" id="closeSidebar">
                 <i class="fas fa-times"></i>
             </button>
         </div>
 
+        <div class="user-profile-top">
+            <div class="user-avatar">
+                <i class="fas fa-user-circle"></i>
+            </div>
+            <div class="user-name"><?php echo $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'کاربر'; ?></div>
+            <div class="user-role"><?php echo isset($_SESSION['user_roles']) ? implode('، ', $_SESSION['user_roles']) : 'کاربر'; ?></div>
+            <a href="/invoice-system-v2/pages/logout.php" class="logout-btn-top">
+                <i class="fas fa-sign-out-alt"></i> خروج
+            </a>
+        </div>
+
         <nav class="sidebar-nav">
             <ul>
-                <li class="active">
+                <li class="<?php echo (basename($_SERVER['PHP_SELF']) == 'dashboard.php') ? 'active' : ''; ?>">
                     <a href="/invoice-system-v2/pages/dashboard.php">
                         <i class="fas fa-home"></i>
                         <span>داشبورد</span>
                     </a>
                 </li>
                 
-                <!-- شرکت‌ها -->
-                <li class="dropdown">
-                    <a href="#" class="dropdown-toggle">
+                <!-- مدیریت سازمانی -->
+                <li class="<?php echo (basename($_SERVER['PHP_SELF']) == 'manage.php') ? 'active' : ''; ?>">
+                    <a href="/invoice-system-v2/pages/manage.php">
                         <i class="fas fa-building"></i>
-                        <span>شرکت‌ها</span>
-                        <i class="fas fa-chevron-down arrow"></i>
+                        <span>مدیریت سازمانی</span>
                     </a>
-                    <ul class="dropdown-menu">
-                        <li><a href="/invoice-system-v2/pages/manage.php?tab=companies"><i class="fas fa-list"></i> لیست شرکت‌ها</a></li>
-                        <li><a href="/invoice-system-v2/pages/manage.php?tab=companies"><i class="fas fa-plus"></i> شرکت جدید</a></li>
-                    </ul>
-                </li>
-
-                <!-- فروشندگان -->
-                <li class="dropdown">
-                    <a href="#" class="dropdown-toggle">
-                        <i class="fas fa-users"></i>
-                        <span>فروشندگان</span>
-                        <i class="fas fa-chevron-down arrow"></i>
-                    </a>
-                    <ul class="dropdown-menu">
-                        <li><a href="/invoice-system-v2/pages/manage.php?tab=vendors"><i class="fas fa-list"></i> لیست فروشندگان</a></li>
-                        <li><a href="/invoice-system-v2/pages/manage.php?tab=vendors"><i class="fas fa-user-plus"></i> فروشنده جدید</a></li>
-                    </ul>
-                </li>
-
-                <!-- کارگاه‌ها -->
-                <li class="dropdown">
-                    <a href="#" class="dropdown-toggle">
-                        <i class="fas fa-hard-hat"></i>
-                        <span>کارگاه‌ها</span>
-                        <i class="fas fa-chevron-down arrow"></i>
-                    </a>
-                    <ul class="dropdown-menu">
-                        <li><a href="/invoice-system-v2/pages/manage.php?tab=workshops"><i class="fas fa-list"></i> لیست کارگاه‌ها</a></li>
-                        <li><a href="/invoice-system-v2/pages/manage.php?tab=workshops"><i class="fas fa-plus"></i> کارگاه جدید</a></li>
-                    </ul>
                 </li>
 
                 <!-- فاکتورها -->
-                <li class="dropdown">
-                    <a href="#" class="dropdown-toggle">
+                <li class="<?php echo (basename($_SERVER['PHP_SELF']) == 'inbox.php' || basename($_SERVER['PHP_SELF']) == 'invoice-create.php' || basename($_SERVER['PHP_SELF']) == 'invoice-edit.php' || basename($_SERVER['PHP_SELF']) == 'invoice-view.php') ? 'active' : ''; ?>">
+                    <a href="/invoice-system-v2/pages/inbox.php">
                         <i class="fas fa-file-invoice"></i>
                         <span>فاکتورها</span>
-                        <i class="fas fa-chevron-down arrow"></i>
+                        <?php if ($invoice_count > 0): ?>
+                            <span class="badge" id="invoiceBadge"><?php echo $invoice_count; ?></span>
+                        <?php endif; ?>
                     </a>
-                    <ul class="dropdown-menu">
-                        <li><a href="/invoice-system-v2/pages/inbox.php"><i class="fas fa-list"></i> همه فاکتورها</a></li>
-                        <li><a href="/invoice-system-v2/pages/invoice-create.php"><i class="fas fa-plus"></i> فاکتور جدید</a></li>
-                        <li><a href="/invoice-system-v2/pages/pending-invoices.php"><i class="fas fa-clock"></i> در انتظار تایید</a></li>
-                        <li><a href="/invoice-system-v2/pages/approved-invoices.php"><i class="fas fa-check"></i> تایید شده</a></li>
-                    </ul>
                 </li>
 
                 <!-- بارنامه‌ها -->
-                <li>
+                <li class="<?php echo (basename($_SERVER['PHP_SELF']) == 'waybills.php') ? 'active' : ''; ?>">
                     <a href="/invoice-system-v2/pages/waybills.php">
                         <i class="fas fa-truck"></i>
                         <span>بارنامه‌ها</span>
-                        <span class="badge">5</span>
+                        <?php if ($waybill_count > 0): ?>
+                            <span class="badge" id="waybillBadge"><?php echo $waybill_count; ?></span>
+                        <?php endif; ?>
                     </a>
                 </li>
 
                 <!-- سامانه مودیان -->
-                <li>
+                <li class="<?php echo (basename($_SERVER['PHP_SELF']) == 'tax.php') ? 'active' : ''; ?>">
                     <a href="/invoice-system-v2/pages/tax.php">
                         <i class="fas fa-cloud-upload-alt"></i>
                         <span>سامانه مودیان</span>
-                        <span class="badge" style="background:#f39c12;">12</span>
+                        <?php if ($tax_count > 0): ?>
+                            <span class="badge orange" id="taxBadge"><?php echo $tax_count; ?></span>
+                        <?php endif; ?>
                     </a>
                 </li>
 
-                <!-- گزارش‌ها -->
+                <!-- راهنما -->
                 <li class="dropdown">
                     <a href="#" class="dropdown-toggle">
-                        <i class="fas fa-chart-line"></i>
-                        <span>گزارش‌ها</span>
+                        <i class="fas fa-question-circle"></i>
+                        <span>راهنما</span>
                         <i class="fas fa-chevron-down arrow"></i>
                     </a>
                     <ul class="dropdown-menu">
-                        <li><a href="/invoice-system-v2/pages/reports.php"><i class="fas fa-chart-pie"></i> گزارش مالی</a></li>
-                        <li><a href="/invoice-system-v2/pages/inbox.php"><i class="fas fa-file-invoice"></i> گزارش فاکتورها</a></li>
-                        <li><a href="/invoice-system-v2/pages/tax-reports.php"><i class="fas fa-percent"></i> گزارش مالیات</a></li>
+                        <li><a href="#" class="guide-link" data-guide="invoice"><i class="fas fa-file-invoice"></i> راهنمای فاکتورها</a></li>
+                        <li><a href="#" class="guide-link" data-guide="waybill"><i class="fas fa-truck"></i> راهنمای بارنامه‌ها</a></li>
+                        <li><a href="#" class="guide-link" data-guide="tax"><i class="fas fa-cloud-upload-alt"></i> راهنمای سامانه مودیان</a></li>
+                        <li><a href="#" class="guide-link" data-guide="flow"><i class="fas fa-project-diagram"></i> روند تایید و ارجاع</a></li>
                     </ul>
                 </li>
-
-                <!-- مدیریت (چک مستقیم از session) -->
+                
                 <?php 
                 $is_admin = false;
                 if (isset($_SESSION['user_roles']) && is_array($_SESSION['user_roles'])) {
@@ -394,76 +537,120 @@
         </nav>
 
         <div class="sidebar-footer">
-            <div class="user-profile">
-                <img src="https://i.pravatar.cc/150?img=33" alt="پروفایل">
-                <div class="user-info">
-                    <h4><?php echo $_SESSION['username'] ?? 'کاربر'; ?></h4>
-                    <p><?php echo isset($_SESSION['user_roles']) ? implode('، ', $_SESSION['user_roles']) : 'کاربر'; ?></p>
-                </div>
+            <div class="footer-logo">
+                <img src="/invoice-system-v2/assets/images/logo.png" alt="لوگو" onerror="this.style.display='none'">
             </div>
-            <a href="/invoice-system-v2/pages/logout.php" class="logout-btn">
-                <i class="fas fa-sign-out-alt"></i>
-            </a>
+            <div class="copyright">© ۱۴۰۴ - کلیه حقوق محفوظ است</div>
+            <div class="developer">
+                <i class="fas fa-code"></i> Rezaahmadabadi
+            </div>
         </div>
     </aside>
 
-    <!-- محتوای اصلی -->
     <main class="main-content">
-        <!-- هدر بالا -->
         <header class="top-header">
             <button class="menu-toggle" id="menuToggle">
                 <i class="fas fa-bars"></i>
             </button>
-            
-            <div class="search-box">
-                <i class="fas fa-search"></i>
-                <input type="text" placeholder="جستجوی فاکتور، پیمانکار، شرکت...">
-            </div>
-
-            <div class="header-actions">
-                <button class="header-btn">
-                    <i class="fas fa-bell"></i>
-                    <span class="notification-dot"></span>
-                </button>
-                <button class="header-btn">
-                    <i class="fas fa-envelope"></i>
-                </button>
-                <button class="header-btn">
-                    <i class="fas fa-user-circle"></i>
-                </button>
-            </div>
         </header>
 
         <?php echo $content; ?>
     </main>
 
-    <!-- اورلی برای موبایل -->
     <div class="overlay" id="overlay"></div>
 
+    <div id="guideModal" class="guide-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; border-radius: 24px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 24px; box-shadow: 0 20px 35px rgba(0,0,0,0.2);">
+            <h3 id="guideTitle" style="color: #1e293b; margin-bottom: 16px; font-size: 20px; border-bottom: 2px solid #3b82f6; display: inline-block; padding-bottom: 5px;">راهنما</h3>
+            <div id="guideBody" style="color: #475569; line-height: 1.7;"></div>
+            <button class="guide-close" onclick="closeGuideModal()" style="background: #3b82f6; color: white; border: none; padding: 10px 24px; border-radius: 30px; cursor: pointer; margin-top: 20px;">بستن</button>
+        </div>
+    </div>
+
     <script>
-        // سایدبار
-        document.getElementById('menuToggle')?.addEventListener('click', () => {
-            document.getElementById('sidebar').classList.add('active');
-            document.getElementById('overlay').classList.add('active');
-        });
-
-        document.getElementById('closeSidebar')?.addEventListener('click', () => {
-            document.getElementById('sidebar').classList.remove('active');
-            document.getElementById('overlay').classList.remove('active');
-        });
-
-        document.getElementById('overlay')?.addEventListener('click', () => {
-            document.getElementById('sidebar').classList.remove('active');
-            document.getElementById('overlay').classList.remove('active');
-        });
-
-        // دراپ‌داون
+        const menuToggle = document.getElementById('menuToggle');
+        const closeSidebar = document.getElementById('closeSidebar');
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('overlay');
+        
+        if (menuToggle) {
+            menuToggle.addEventListener('click', () => {
+                sidebar.classList.add('active');
+                overlay.classList.add('active');
+            });
+        }
+        
+        if (closeSidebar) {
+            closeSidebar.addEventListener('click', () => {
+                sidebar.classList.remove('active');
+                overlay.classList.remove('active');
+            });
+        }
+        
+        if (overlay) {
+            overlay.addEventListener('click', () => {
+                sidebar.classList.remove('active');
+                overlay.classList.remove('active');
+            });
+        }
+        
         document.querySelectorAll('.dropdown-toggle').forEach(toggle => {
             toggle.addEventListener('click', (e) => {
                 e.preventDefault();
                 const parent = toggle.closest('.dropdown');
-                parent.classList.toggle('open');
+                if (parent) {
+                    parent.classList.toggle('open');
+                }
             });
+        });
+        
+        const guideContent = {
+            invoice: {
+                title: '📄 راهنمای فاکتورها',
+                body: '<h4>ایجاد فاکتور جدید</h4><ul><li><strong>شماره فاکتور:</strong> شماره دلخواه (با مخفف شرکت ترکیب می‌شود)</li><li><strong>شرکت و فروشنده:</strong> انتخاب از لیست‌های از پیش تعریف شده</li><li><strong>مبلغ و تخفیف:</strong> وارد کردن مبلغ پایه و تخفیف</li><li><strong>فایل ضمیمه:</strong> آپلود تصویر یا PDF فاکتور</li><li><strong>ارجاع:</strong> انتخاب بخش یا شخص مقصد</li></ul><h4>وضعیت‌های فاکتور</h4><ul><li><strong>پیش‌نویس:</strong> فاکتور ذخیره شده اما هنوز ارسال نشده</li><li><strong>در انتظار:</strong> فاکتور ارسال شده و در دست بررسی</li><li><strong>تایید شده:</strong> تایید نهایی</li><li><strong>رد شده:</strong> فاکتور رد شده</li></ul>'
+            },
+            waybill: {
+                title: '🚛 راهنمای بارنامه‌ها',
+                body: '<h4>ایجاد بارنامه جدید</h4><ul><li><strong>عنوان و شماره بارنامه</strong></li><li><strong>شرکت و فروشنده</strong></li><li><strong>فرستنده و گیرنده</strong></li><li><strong>مبدا و مقصد بارگیری</strong></li><li><strong>فایل ضمیمه (اختیاری)</strong></li></ul><h4>اطلاعات تکمیلی</h4><p>می‌توانید اطلاعات راننده، پلاک، تعداد، وزن، مسئول حمل و شرکت بیمه را ثبت کنید.</p>'
+            },
+            tax: {
+                title: '☁️ راهنمای سامانه مودیان',
+                body: '<h4>ایجاد سند مالیاتی</h4><ul><li><strong>شناسه مالیاتی:</strong> به صورت خودکار با فرمت Tax-XXXX-XXXXXX ذخیره می‌شود</li><li><strong>شناسه ملی فروشنده:</strong> الزامی است</li><li><strong>ارسال به مودیان:</strong> پس از ثبت نهایی، سند در صف ارسال قرار می‌گیرد</li></ul><h4>وضعیت ارسال</h4><ul><li><strong>در انتظار:</strong> سند ثبت شده اما ارسال نشده</li><li><strong>ارسال شده:</strong> سند با موفقیت ارسال شد</li><li><strong>خطا:</strong> خطا در ارسال</li></ul>'
+            },
+            flow: {
+                title: '🔄 روند تایید و ارجاع',
+                body: '<h4>مراحل گردش کاری اسناد</h4><ol><li><strong>ایجاد:</strong> سند توسط کاربر ایجاد می‌شود</li><li><strong>ارجاع:</strong> سند به بخش یا شخص خاص ارجاع می‌شود</li><li><strong>بررسی:</strong> فرد یا بخش مقصد سند را بررسی می‌کند</li><li><strong>تایید یا رد:</strong> شخص مجاز سند را تایید یا رد می‌کند</li></ol><h4>نمایش در دست</h4><p>در کارت هر سند، وضعیت <strong>"📍 در دست"</strong> نشان می‌دهد سند در اختیار چه شخص یا بخشی است.</p>'
+            }
+        };
+        
+        function openGuideModal(type) {
+            const modal = document.getElementById('guideModal');
+            const title = document.getElementById('guideTitle');
+            const body = document.getElementById('guideBody');
+            const content = guideContent[type];
+            if (content) {
+                title.innerHTML = content.title;
+                body.innerHTML = content.body;
+                modal.style.display = 'flex';
+            }
+        }
+        
+        function closeGuideModal() {
+            document.getElementById('guideModal').style.display = 'none';
+        }
+        
+        document.querySelectorAll('.guide-link').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const guideType = link.getAttribute('data-guide');
+                openGuideModal(guideType);
+            });
+        });
+        
+        document.getElementById('guideModal').addEventListener('click', (e) => {
+            if (e.target === document.getElementById('guideModal')) {
+                closeGuideModal();
+            }
         });
     </script>
 </body>
