@@ -129,7 +129,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     }
 }
 
-// تابع تولید شماره بارنامه با فرمت جدید
 function formatWaybillNumber($document_number, $short_name) {
     if (strpos($document_number, '-B/L-') !== false) {
         return $document_number;
@@ -275,6 +274,11 @@ ob_start();
         font-weight: 600;
         color: var(--text-main);
         text-align: left;
+        word-break: break-word;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
     }
     .amount-value {
         color: var(--success);
@@ -548,19 +552,19 @@ ob_start();
             <div class="card-body">
                 <div class="info-row">
                     <span class="info-label">👤 فرستنده</span>
-                    <span class="info-value"><?php echo htmlspecialchars($waybill['sender_name'] ?? '-'); ?></span>
+                    <span class="info-value" title="<?php echo htmlspecialchars($waybill['sender_name'] ?? '-'); ?>"><?php echo htmlspecialchars(mb_substr($waybill['sender_name'] ?? '-', 0, 30)) . (mb_strlen($waybill['sender_name'] ?? '') > 30 ? '...' : ''); ?></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">👤 گیرنده</span>
-                    <span class="info-value"><?php echo htmlspecialchars($waybill['receiver_name'] ?? '-'); ?></span>
+                    <span class="info-value" title="<?php echo htmlspecialchars($waybill['receiver_name'] ?? '-'); ?>"><?php echo htmlspecialchars(mb_substr($waybill['receiver_name'] ?? '-', 0, 30)) . (mb_strlen($waybill['receiver_name'] ?? '') > 30 ? '...' : ''); ?></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">📍 مبدا</span>
-                    <span class="info-value"><?php echo htmlspecialchars($waybill['loading_origin'] ?? '-'); ?></span>
+                    <span class="info-value" title="<?php echo htmlspecialchars($waybill['loading_origin'] ?? '-'); ?>"><?php echo htmlspecialchars(mb_substr($waybill['loading_origin'] ?? '-', 0, 30)) . (mb_strlen($waybill['loading_origin'] ?? '') > 30 ? '...' : ''); ?></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">📍 مقصد</span>
-                    <span class="info-value"><?php echo htmlspecialchars($waybill['discharge_destination'] ?? '-'); ?></span>
+                    <span class="info-value" title="<?php echo htmlspecialchars($waybill['discharge_destination'] ?? '-'); ?>"><?php echo htmlspecialchars(mb_substr($waybill['discharge_destination'] ?? '-', 0, 30)) . (mb_strlen($waybill['discharge_destination'] ?? '') > 30 ? '...' : ''); ?></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">💰 مبلغ</span>
@@ -708,118 +712,177 @@ ob_start();
     <?php endif; ?>
     
     <?php if ($can_forward || $can_approve_reject): ?>
-    <div class="action-form">
-        <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-bolt" style="color: var(--accent);"></i> اقدامات روی بارنامه</h3>
-        <form method="POST" id="actionForm">
-            <div class="form-group">
-                <label>انتخاب اقدام <span style="color: var(--danger);">*</span></label>
-                <select name="action" id="actionSelect" required>
-                    <option value="">--- انتخاب کنید ---</option>
-                    <?php if ($can_forward): ?>
-                        <option value="forward">🔄 بررسی و پیگیری (ارجاع)</option>
-                    <?php endif; ?>
-                    <?php if ($can_approve_reject): ?>
-                        <option value="approve">✅ تایید نهایی</option>
-                        <option value="reject">❌ رد بارنامه</option>
-                    <?php endif; ?>
-                </select>
-            </div>
-            
-            <div id="forwardFields" style="display: none;">
-                <div class="row-2col">
+        <div class="action-form">
+            <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-bolt" style="color: var(--accent);"></i> اقدامات روی بارنامه</h3>
+            <form method="POST" id="actionForm">
+                <div class="form-group">
+                    <label>انتخاب اقدام <span style="color: var(--danger);">*</span></label>
+                    <select name="action" id="actionSelect" required>
+                        <option value="">--- انتخاب کنید ---</option>
+                        <?php if ($can_forward): ?>
+                            <option value="forward">🔄 بررسی و پیگیری (ارجاع)</option>
+                        <?php endif; ?>
+                        <?php if ($can_approve_reject): ?>
+                            <option value="approve">✅ تایید نهایی</option>
+                            <option value="reject">❌ رد بارنامه</option>
+                        <?php endif; ?>
+                    </select>
+                </div>
+                
+                <div id="forwardFields" style="display: none;">
+                    <!-- رادیو دکمه برای انتخاب نوع ارجاع (انحصاری) -->
                     <div class="form-group">
-                        <label>📋 ارجاع به بخش</label>
-                        <select name="to_department">
-                            <option value="">انتخاب کنید</option>
-                            <?php foreach ($departments as $dept): ?>
-                                <option value="<?php echo $dept['id']; ?>">🏢 <?php echo htmlspecialchars($dept['name']); ?></option>
-                            <?php endforeach; ?>
-                        </select>
+                        <label>نوع ارجاع <span style="color: var(--danger);">*</span></label>
+                        <div style="display: flex; gap: 20px; margin-top: 8px;">
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="radio" name="forward_type" value="department" id="forwardDeptRadio" checked>
+                                <i class="fas fa-building"></i> ارجاع به بخش
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="radio" name="forward_type" value="user" id="forwardUserRadio">
+                                <i class="fas fa-user"></i> ارجاع به شخص
+                            </label>
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label>👤 ارجاع به شخص</label>
-                        <select name="to_user">
-                            <option value="">انتخاب کنید</option>
-                            <?php foreach ($users as $user): ?>
-                                <option value="<?php echo $user['id']; ?>">👤 <?php echo htmlspecialchars($user['full_name']); ?></option>
-                            <?php endforeach; ?>
-                        </select>
+                    
+                    <div class="row-2col">
+                        <div class="form-group" id="departmentSelect">
+                            <label>📋 انتخاب بخش</label>
+                            <select name="to_department" id="forwardDepartment">
+                                <option value="">--- انتخاب کنید ---</option>
+                                <?php foreach ($departments as $dept): ?>
+                                    <option value="<?php echo $dept['id']; ?>">🏢 <?php echo htmlspecialchars($dept['name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="form-group" id="userSelect" style="display: none;">
+                            <label>👤 انتخاب شخص</label>
+                            <select name="to_user" id="forwardUser">
+                                <option value="">--- انتخاب کنید ---</option>
+                                <?php foreach ($users as $user): ?>
+                                    <option value="<?php echo $user['id']; ?>">👤 <?php echo htmlspecialchars($user['full_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                     </div>
                 </div>
-            </div>
-            
-            <div class="form-group">
-                <label>📝 توضیحات <span id="notesRequiredStar" style="color: var(--danger);">*</span></label>
-                <textarea name="notes" id="actionNotes" rows="2" placeholder="توضیحات خود را وارد کنید..."></textarea>
-            </div>
-            
-            <button type="submit" class="btn-submit" id="submitBtn">ثبت اقدام</button>
-        </form>
-    </div>
-    
-    <script>
-    const actionSelect = document.getElementById('actionSelect');
-    const forwardFields = document.getElementById('forwardFields');
-    const actionNotes = document.getElementById('actionNotes');
-    const notesRequiredStar = document.getElementById('notesRequiredStar');
-    
-    function toggleFields() {
-        const val = actionSelect.value;
-        forwardFields.style.display = 'none';
+                
+                <div class="form-group">
+                    <label>📝 توضیحات <span id="notesRequiredStar" style="color: var(--danger);">*</span></label>
+                    <textarea name="notes" id="actionNotes" rows="2" placeholder="توضیحات خود را وارد کنید..."></textarea>
+                </div>
+                
+                <button type="submit" class="btn-submit" id="submitBtn">ثبت اقدام</button>
+            </form>
+        </div>
         
-        if (val === 'forward') {
-            forwardFields.style.display = 'block';
-            actionNotes.required = true;
-            notesRequiredStar.style.display = 'inline';
-            actionNotes.placeholder = 'لطفاً دلیل بررسی و پیگیری را وارد کنید...';
-        } else if (val === 'reject') {
-            forwardFields.style.display = 'none';
-            actionNotes.required = true;
-            notesRequiredStar.style.display = 'inline';
-            actionNotes.placeholder = 'لطفاً دلیل رد را وارد کنید...';
-        } else if (val === 'approve') {
-            forwardFields.style.display = 'none';
-            actionNotes.required = false;
-            notesRequiredStar.style.display = 'none';
-            actionNotes.placeholder = '(اختیاری) توضیحات...';
-        } else {
-            actionNotes.required = false;
-            notesRequiredStar.style.display = 'none';
-        }
-    }
-    
-    actionSelect.addEventListener('change', toggleFields);
-    
-    document.getElementById('submitBtn').addEventListener('click', function(e) {
-        const val = actionSelect.value;
-        if (val === '') {
-            e.preventDefault();
-            alert('لطفاً یک اقدام را انتخاب کنید');
-            return false;
-        }
-        if (val === 'forward') {
-            const dept = document.querySelector('select[name="to_department"]').value;
-            const user = document.querySelector('select[name="to_user"]').value;
-            if (dept === '' && user === '') {
-                e.preventDefault();
-                alert('لطفاً بخش یا شخص مقصد را انتخاب کنید');
-                return false;
+        <script>
+            const actionSelect = document.getElementById('actionSelect');
+            const forwardFields = document.getElementById('forwardFields');
+            const actionNotes = document.getElementById('actionNotes');
+            const notesRequiredStar = document.getElementById('notesRequiredStar');
+            
+            function toggleFields() {
+                const val = actionSelect.value;
+                forwardFields.style.display = 'none';
+                
+                if (val === 'forward') {
+                    forwardFields.style.display = 'block';
+                    actionNotes.required = true;
+                    notesRequiredStar.style.display = 'inline';
+                    actionNotes.placeholder = 'لطفاً توضیحات بررسی و پیگیری را وارد کنید...';
+                } else if (val === 'reject') {
+                    forwardFields.style.display = 'none';
+                    actionNotes.required = true;
+                    notesRequiredStar.style.display = 'inline';
+                    actionNotes.placeholder = 'لطفاً دلیل رد را وارد کنید...';
+                } else if (val === 'approve') {
+                    forwardFields.style.display = 'none';
+                    actionNotes.required = false;
+                    notesRequiredStar.style.display = 'none';
+                    actionNotes.placeholder = '(اختیاری) توضیحات...';
+                } else {
+                    actionNotes.required = false;
+                    notesRequiredStar.style.display = 'none';
+                }
             }
-            if (actionNotes.value.trim() === '') {
-                e.preventDefault();
-                alert('لطفاً توضیحات را وارد کنید');
-                return false;
+            
+            actionSelect.addEventListener('change', toggleFields);
+            toggleFields();
+            
+            // ========== اسکریپت ارجاع انحصاری (بخش یا شخص) ==========
+            const forwardDeptRadio = document.getElementById('forwardDeptRadio');
+            const forwardUserRadio = document.getElementById('forwardUserRadio');
+            const departmentSelectDiv = document.getElementById('departmentSelect');
+            const userSelectDiv = document.getElementById('userSelect');
+            const forwardDepartment = document.getElementById('forwardDepartment');
+            const forwardUser = document.getElementById('forwardUser');
+            
+            function updateForwardTypeFields() {
+                if (forwardDeptRadio.checked) {
+                    departmentSelectDiv.style.display = 'block';
+                    userSelectDiv.style.display = 'none';
+                    forwardDepartment.disabled = false;
+                    forwardUser.disabled = true;
+                    forwardUser.value = '';
+                } else {
+                    departmentSelectDiv.style.display = 'none';
+                    userSelectDiv.style.display = 'block';
+                    forwardDepartment.disabled = true;
+                    forwardUser.disabled = false;
+                    forwardDepartment.value = '';
+                }
             }
-        }
-        if (val === 'reject' && actionNotes.value.trim() === '') {
-            e.preventDefault();
-            alert('لطفاً دلیل رد را وارد کنید');
-            return false;
-        }
-    });
-    
-    toggleFields();
-    </script>
+            
+            if (forwardDeptRadio && forwardUserRadio) {
+                forwardDeptRadio.addEventListener('change', updateForwardTypeFields);
+                forwardUserRadio.addEventListener('change', updateForwardTypeFields);
+                updateForwardTypeFields();
+            }
+            
+            // ========== اعتبارسنجی نهایی ==========
+            document.getElementById('submitBtn').addEventListener('click', function(e) {
+                const selectedAction = actionSelect.value;
+                
+                if (selectedAction === 'forward') {
+                    const forwardType = document.querySelector('input[name="forward_type"]:checked');
+                    if (!forwardType) {
+                        e.preventDefault();
+                        alert('لطفاً نوع ارجاع را انتخاب کنید (بخش یا شخص)');
+                        return false;
+                    }
+                    
+                    if (forwardType.value === 'department') {
+                        const dept = forwardDepartment.value;
+                        if (!dept) {
+                            e.preventDefault();
+                            alert('لطفاً بخش مقصد را انتخاب کنید');
+                            return false;
+                        }
+                    } else {
+                        const user = forwardUser.value;
+                        if (!user) {
+                            e.preventDefault();
+                            alert('لطفاً شخص مقصد را انتخاب کنید');
+                            return false;
+                        }
+                    }
+                    
+                    const notes = actionNotes.value.trim();
+                    if (notes === '') {
+                        e.preventDefault();
+                        alert('لطفاً توضیحات را وارد کنید');
+                        return false;
+                    }
+                }
+                
+                if (selectedAction === 'reject' && actionNotes.value.trim() === '') {
+                    e.preventDefault();
+                    alert('لطفاً دلیل رد را وارد کنید');
+                    return false;
+                }
+            });
+        </script>
     <?php endif; ?>
     
     <div class="info-card">
@@ -914,6 +977,56 @@ document.getElementById('fileModal').addEventListener('click', function(e) {
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
+
+// ========== به‌روزرسانی شمارنده‌ها ==========
+function updateCounters() {
+    fetch('/invoice-system-v2/ajax/update_counter.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'waybill' })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.invoice_count !== undefined) {
+            const badge = document.getElementById('invoiceBadge');
+            if (badge) {
+                if (data.invoice_count > 0) {
+                    badge.textContent = data.invoice_count;
+                    badge.style.display = 'inline-block';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        }
+        if (data.waybill_count !== undefined) {
+            const badge = document.getElementById('waybillBadge');
+            if (badge) {
+                if (data.waybill_count > 0) {
+                    badge.textContent = data.waybill_count;
+                    badge.style.display = 'inline-block';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        }
+        if (data.tax_count !== undefined) {
+            const badge = document.getElementById('taxBadge');
+            if (badge) {
+                if (data.tax_count > 0) {
+                    badge.textContent = data.tax_count;
+                    badge.style.display = 'inline-block';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        }
+    })
+    .catch(error => console.error('Error:', error));
+}
+
+<?php if (($waybill['status'] == 'pending' || $waybill['status'] == 'forwarded') && $is_holder): ?>
+    updateCounters();
+<?php endif; ?>
 </script>
 
 <?php

@@ -69,7 +69,13 @@ $sql = "SELECT d.*,
         LEFT JOIN vendors v ON d.vendor_id = v.id
         LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
         LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
-        WHERE d.type = 'tax' $date_condition";
+        WHERE d.type = 'tax'
+        AND (d.created_by = ? OR d.current_holder_user_id = ? OR d.current_holder_department_id = ?)
+        $date_condition";
+
+// پارامترها - سه مقدار اول برای سه شرط بالا
+$user_id = $_SESSION['user_id'];
+$params = array_merge([$user_id, $user_id, $_SESSION['user_department_id'] ?? null], $params);
 
 if ($filter_company) {
     $sql .= " AND d.company_id = ?";
@@ -239,7 +245,7 @@ ob_start();
     /* ========== کارت‌ها - گرید فشرده (مشابه inbox.php) ========== */
     .cards-list {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
         gap: 16px;
         max-height: 70vh;
         overflow-y: auto;
@@ -334,6 +340,11 @@ ob_start();
     .info-value {
         font-weight: 600;
         color: #2c3e50;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+        display: block;
     }
     
     .amount-value {
@@ -478,7 +489,7 @@ ob_start();
 <div class="filters-container">
     <div class="search-box">
         <i class="fas fa-search"></i>
-        <input type="text" id="searchInput" placeholder="جستجو..." value="<?php echo htmlspecialchars($search); ?>">
+        <input type="text" id="searchInput" placeholder="    جستجو..." value="<?php echo htmlspecialchars($search); ?>">
     </div>
     <div class="year-month" style="display: flex; gap: 8px;">
         <select id="yearSelect">
