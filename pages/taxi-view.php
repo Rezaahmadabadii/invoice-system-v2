@@ -6,6 +6,9 @@ require_once __DIR__ . '/../app/Helpers/functions.php';
 require_once __DIR__ . '/../vendor/sallar/jdatetime/jdatetime.class.php';
 session_start();
 
+$error = '';
+$success = '';
+
 if (!isset($_SESSION['user_id'])) {
     header('Location: login.php');
     exit;
@@ -55,17 +58,21 @@ if (!$tax) {
 
 $user_id = $_SESSION['user_id'];
 $user_roles = $_SESSION['user_roles'] ?? [];
+$user_department_id = $_SESSION['user_department_id'] ?? null;
+
 $is_creator = ($tax['created_by'] == $user_id);
 $is_holder_user = ($tax['current_holder_user_id'] == $user_id);
-$is_holder_department = ($tax['current_holder_department_id'] && in_array($tax['current_holder_department_id'], $_SESSION['user_role_ids'] ?? []));
-$is_holder = $is_holder_user || $is_holder_department;
+$is_holder_department = ($tax['current_holder_department_id'] == $user_department_id);
+$is_holder = ($is_holder_user || $is_holder_department);
 $is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 
-$can_forward = $is_holder && !in_array($tax['status'], ['approved', 'rejected']);
+$is_locked = in_array($tax['status'], ['approved', 'rejected', 'forwarded']);
+$can_forward = $is_holder && !$is_locked;
+$can_cancel_forward = ($is_creator && $tax['status'] == 'forwarded' && !$is_holder && !$is_locked);
 $can_approve_reject = ($is_creator || $is_admin) && !in_array($tax['status'], ['approved', 'rejected']);
 
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-$users = $pdo->query("SELECT id, full_name, username FROM users ORDER BY full_name")->fetchAll();
+$users = $pdo->query("SELECT id, full_name, username FROM users WHERE id != ? ORDER BY full_name")->fetchAll([$user_id]);
 
 $history_stmt = $pdo->prepare("
     SELECT fh.*, 
@@ -82,9 +89,6 @@ $history_stmt = $pdo->prepare("
 $history_stmt->execute([$id]);
 $history = $history_stmt->fetchAll();
 
-$error = '';
-$success = '';
-
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $action = $_POST['action'] ?? '';
     $notes = trim($_POST['notes'] ?? '');
@@ -99,11 +103,37 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         } elseif (empty($notes)) {
             $error = 'لطفاً توضیحات را وارد کنید';
         } else {
+            if (!empty($to_user)) {
+                $new_holder_user_id = $to_user;
+                $new_holder_department_id = null;
+            } else {
+                $new_holder_user_id = null;
+                $new_holder_department_id = $to_department;
+            }
+            
             $update = $pdo->prepare("UPDATE documents SET status = 'forwarded', current_holder_department_id = ?, current_holder_user_id = ? WHERE id = ?");
-            $update->execute([$to_department ?: null, $to_user ?: null, $id]);
+            $update->execute([$new_holder_department_id, $new_holder_user_id, $id]);
+            
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) VALUES (?, ?, ?, ?, 'forward', ?)");
-            $insert->execute([$id, $_SESSION['user_id'], $to_department ?: null, $to_user ?: null, $notes]);
+            $insert->execute([$id, $_SESSION['user_id'], $new_holder_department_id, $new_holder_user_id, $notes]);
+            
             $success = 'سند با موفقیت ارجاع شد.';
+            echo '<script>if(typeof updateCounters === "function") updateCounters();</script>';
+        }
+    } elseif ($action == 'cancel_forward') {
+        if (!$can_cancel_forward) {
+            $error = 'شما مجاز به برگشت این ارجاع نیستید.';
+        } elseif (empty($notes)) {
+            $error = 'لطفاً دلیل برگشت ارجاع را وارد کنید';
+        } else {
+            $update = $pdo->prepare("UPDATE documents SET current_holder_user_id = ?, current_holder_department_id = NULL, status = 'pending' WHERE id = ?");
+            $update->execute([$tax['created_by'], $id]);
+            
+            $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_user_id, action, notes) VALUES (?, ?, ?, 'cancel_forward', ?)");
+            $insert->execute([$id, $_SESSION['user_id'], $tax['created_by'], $notes]);
+            
+            $success = 'ارجاع سند با موفقیت برگشت داده شد.';
+            echo '<script>setTimeout(function() { window.location.href = "tax.php"; }, 1500);</script>';
         }
     } elseif ($action == 'approve') {
         if (!$can_approve_reject) {
@@ -111,9 +141,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         } else {
             $update = $pdo->prepare("UPDATE documents SET status = 'approved' WHERE id = ?");
             $update->execute([$id]);
+            
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'approve', ?)");
             $insert->execute([$id, $_SESSION['user_id'], $notes]);
+            
             $success = 'سند با موفقیت تایید نهایی شد.';
+            echo '<script>setTimeout(function() { window.location.href = "tax.php"; }, 1500);</script>';
         }
     } elseif ($action == 'reject') {
         if (!$can_approve_reject) {
@@ -123,16 +156,18 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         } else {
             $update = $pdo->prepare("UPDATE documents SET status = 'rejected', rejection_reason = ? WHERE id = ?");
             $update->execute([$notes, $id]);
+            
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'reject', ?)");
             $insert->execute([$id, $_SESSION['user_id'], $notes]);
+            
             $success = 'سند رد شد.';
+            echo '<script>setTimeout(function() { window.location.href = "tax.php"; }, 1500);</script>';
         }
     } else {
         $error = 'اقدام نامعتبر است.';
     }
 }
 
-// تابع تولید شناسه مالیاتی فرمت شده
 function generateFormattedTaxId($companyShortName, $taxId) {
     $code = strtoupper(preg_replace('/[^a-zA-Z0-9]/', '', $companyShortName));
     if (empty($code)) $code = 'TAX';
@@ -206,7 +241,6 @@ ob_start();
         color: white;
     }
     
-    /* سه ستونه برای اطلاعات بالا */
     .three-columns {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
@@ -214,7 +248,6 @@ ob_start();
         margin-bottom: 24px;
     }
     
-    /* کارت‌ها */
     .info-card {
         background: var(--card-bg);
         border-radius: 20px;
@@ -254,7 +287,6 @@ ob_start();
     .card-green .card-header { background: var(--green-light); }
     .card-green .card-header i { color: var(--success); }
     
-    /* اطلاعات درون کارت */
     .info-row {
         display: flex;
         justify-content: space-between;
@@ -308,7 +340,6 @@ ob_start();
     .tax-status-pending { background: #fff3cd; color: #f39c12; }
     .tax-status-failed { background: #f8d7da; color: #e74c3c; }
     
-    /* پیش‌نمایش فایل فشرده */
     .file-preview-mini {
         display: flex;
         align-items: center;
@@ -340,7 +371,6 @@ ob_start();
         font-size: 11px;
     }
     
-    /* وضعیت در دست */
     .holder-box {
         background: var(--primary-light);
         border-radius: 12px;
@@ -349,7 +379,6 @@ ob_start();
         margin-top: 12px;
     }
     
-    /* سه گانه وضعیت فشرده */
     .status-steps {
         display: flex;
         justify-content: space-between;
@@ -368,7 +397,6 @@ ob_start();
     .step-item.completed { color: var(--success); }
     .step-item i { font-size: 14px; display: block; margin-bottom: 4px; }
     
-    /* فرم اقدامات */
     .action-form {
         background: white;
         border-radius: 20px;
@@ -409,8 +437,17 @@ ob_start();
         font-size: 13px;
         font-weight: 600;
     }
+    .btn-cancel {
+        background: linear-gradient(135deg, #ef4444, #dc2626);
+        color: white;
+        border: none;
+        padding: 10px 24px;
+        border-radius: 40px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+    }
     
-    /* تاریخچه جدولی فشرده */
     .history-wrapper {
         max-height: 250px;
         overflow-y: auto;
@@ -445,6 +482,7 @@ ob_start();
     .action-forward { background: #fff3cd; color: #f39c12; }
     .action-approve { background: #d4edda; color: #2ecc71; }
     .action-reject { background: #f8d7da; color: #e74c3c; }
+    .action-cancel { background: #fee2e2; color: #dc2626; }
     
     .alert {
         padding: 12px 16px;
@@ -455,7 +493,6 @@ ob_start();
     .alert-danger { background: #fee8e8; color: var(--danger); border-right: 3px solid var(--danger); }
     .alert-success { background: #d4edda; color: #155724; border-right: 3px solid var(--success); }
     
-    /* مودال */
     .modal {
         display: none;
         position: fixed;
@@ -533,10 +570,8 @@ ob_start();
         <script>setTimeout(function() { window.location.reload(); }, 2000);</script>
     <?php endif; ?>
     
-    <!-- سه ستونه اطلاعات اصلی -->
     <div class="three-columns">
         
-        <!-- ستون 1: اطلاعات سند -->
         <div class="info-card card-blue">
             <div class="card-header">
                 <i class="fas fa-file-alt"></i>
@@ -566,7 +601,6 @@ ob_start();
             </div>
         </div>
         
-        <!-- ستون 2: اطلاعات مالی و وضعیت -->
         <div class="info-card card-purple">
             <div class="card-header">
                 <i class="fas fa-chart-line"></i>
@@ -612,14 +646,12 @@ ob_start();
             </div>
         </div>
         
-        <!-- ستون 3: فایل ضمیمه + در دست -->
         <div class="info-card card-green">
             <div class="card-header">
                 <i class="fas fa-paperclip"></i>
                 <h3>ضمیمه و وضعیت در دست</h3>
             </div>
             <div class="card-body">
-                <!-- فایل ضمیمه -->
                 <?php if ($tax['file_path'] && file_exists(__DIR__ . '/../' . $tax['file_path'])): 
                     $file_url = '/invoice-system-v2/' . $tax['file_path'];
                     $file_ext = strtolower(pathinfo($tax['file_path'], PATHINFO_EXTENSION));
@@ -644,7 +676,6 @@ ob_start();
                     </div>
                 <?php endif; ?>
                 
-                <!-- در دست -->
                 <div class="holder-box">
                     <i class="fas fa-location-dot"></i>
                     <strong>📍 در دست:</strong><br>
@@ -652,14 +683,13 @@ ob_start();
                     if ($tax['holder_user_name']) {
                         echo '👤 ' . htmlspecialchars($tax['holder_user_name']);
                     } elseif ($tax['holder_department_name']) {
-                        echo '🏢 ' . htmlspecialchars($tax['holder_department_name']) . ' (بخش)';
+                        echo '🏢 ' . htmlspecialchars($tax['holder_department_name']);
                     } else {
                         echo '📭 بدون متصدی';
                     }
                     ?>
                 </div>
                 
-                <!-- سه گانه وضعیت فشرده -->
                 <div class="status-steps">
                     <div class="step-item <?php echo ($tax['status'] != 'draft') ? 'completed' : 'active'; ?>">
                         <i class="fas fa-pen"></i> ایجاد
@@ -675,7 +705,6 @@ ob_start();
         </div>
     </div>
     
-    <!-- توضیحات (در صورت وجود) -->
     <?php if ($tax['description']): ?>
     <div class="info-card" style="margin-bottom: 24px;">
         <div class="card-header">
@@ -688,8 +717,7 @@ ob_start();
     </div>
     <?php endif; ?>
     
-    <!-- فرم اقدامات (در صورت مجاز بودن) -->
-    <?php if ($can_forward || $can_approve_reject): ?>
+    <?php if ($can_forward || $can_approve_reject || $can_cancel_forward): ?>
     <div class="action-form">
         <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-bolt" style="color: var(--accent);"></i> اقدامات روی سند</h3>
         <form method="POST" id="actionForm">
@@ -700,6 +728,9 @@ ob_start();
                     <?php if ($can_forward): ?>
                         <option value="forward">🔄 بررسی و پیگیری (ارجاع)</option>
                     <?php endif; ?>
+                    <?php if ($can_cancel_forward): ?>
+                        <option value="cancel_forward">↩️ برگشت ارجاع</option>
+                    <?php endif; ?>
                     <?php if ($can_approve_reject): ?>
                         <option value="approve">✅ تایید نهایی</option>
                         <option value="reject">❌ رد سند</option>
@@ -708,7 +739,6 @@ ob_start();
             </div>
             
             <div id="forwardFields" style="display: none;">
-                <!-- رادیو دکمه برای انتخاب نوع ارجاع -->
                 <div class="form-group">
                     <label>نوع ارجاع <span style="color: var(--danger);">*</span></label>
                     <div style="display: flex; gap: 20px; margin-top: 8px;">
@@ -755,7 +785,6 @@ ob_start();
     </div>
     
     <script>
-        // اسکریپت تغییر فیلدها بر اساس اقدام انتخاب شده
         const actionSelect = document.getElementById('actionSelect');
         const forwardFields = document.getElementById('forwardFields');
         const actionNotes = document.getElementById('actionNotes');
@@ -770,6 +799,11 @@ ob_start();
                 actionNotes.required = true;
                 notesRequiredStar.style.display = 'inline';
                 actionNotes.placeholder = 'لطفاً دلیل بررسی و پیگیری را وارد کنید...';
+            } else if (val === 'cancel_forward') {
+                forwardFields.style.display = 'none';
+                actionNotes.required = true;
+                notesRequiredStar.style.display = 'inline';
+                actionNotes.placeholder = 'لطفاً دلیل برگشت ارجاع را وارد کنید...';
             } else if (val === 'reject') {
                 forwardFields.style.display = 'none';
                 actionNotes.required = true;
@@ -789,24 +823,23 @@ ob_start();
         actionSelect.addEventListener('change', toggleFields);
         toggleFields();
         
-        // ========== اسکریپت ارجاع انحصاری (بخش یا شخص) ==========
         const forwardDeptRadio = document.getElementById('forwardDeptRadio');
         const forwardUserRadio = document.getElementById('forwardUserRadio');
-        const departmentSelect = document.getElementById('departmentSelect');
-        const userSelect = document.getElementById('userSelect');
+        const departmentSelectDiv = document.getElementById('departmentSelect');
+        const userSelectDiv = document.getElementById('userSelect');
         const forwardDepartment = document.getElementById('forwardDepartment');
         const forwardUser = document.getElementById('forwardUser');
         
         function updateForwardFields() {
             if (forwardDeptRadio.checked) {
-                departmentSelect.style.display = 'block';
-                userSelect.style.display = 'none';
+                departmentSelectDiv.style.display = 'block';
+                userSelectDiv.style.display = 'none';
                 forwardDepartment.disabled = false;
                 forwardUser.disabled = true;
                 forwardUser.value = '';
             } else {
-                departmentSelect.style.display = 'none';
-                userSelect.style.display = 'block';
+                departmentSelectDiv.style.display = 'none';
+                userSelectDiv.style.display = 'block';
                 forwardDepartment.disabled = true;
                 forwardUser.disabled = false;
                 forwardDepartment.value = '';
@@ -819,9 +852,14 @@ ob_start();
             updateForwardFields();
         }
         
-        // ========== اعتبارسنجی نهایی قبل از ارسال ==========
         document.getElementById('submitBtn').addEventListener('click', function(e) {
             const selectedAction = actionSelect.value;
+            
+            if (selectedAction === '') {
+                e.preventDefault();
+                alert('لطفاً یک اقدام را انتخاب کنید');
+                return false;
+            }
             
             if (selectedAction === 'forward') {
                 const forwardType = document.querySelector('input[name="forward_type"]:checked');
@@ -855,19 +893,15 @@ ob_start();
                 }
             }
             
-            if (selectedAction === 'reject') {
-                const notes = actionNotes.value.trim();
-                if (notes === '') {
-                    e.preventDefault();
-                    alert('لطفاً دلیل رد را وارد کنید');
-                    return false;
-                }
+            if ((selectedAction === 'cancel_forward' || selectedAction === 'reject') && actionNotes.value.trim() === '') {
+                e.preventDefault();
+                alert('لطفاً توضیحات را وارد کنید');
+                return false;
             }
         });
     </script>
     <?php endif; ?>
     
-    <!-- تاریخچه ارجاع -->
     <div class="info-card">
         <div class="card-header">
             <i class="fas fa-history"></i>
@@ -909,6 +943,7 @@ ob_start();
                                     $action_class = '';
                                     $action_icon = '';
                                     if ($h['action'] == 'forward') { $action_class = 'action-forward'; $action_icon = '🔄'; $action_text = 'ارجاع'; }
+                                    elseif ($h['action'] == 'cancel_forward') { $action_class = 'action-cancel'; $action_icon = '↩️'; $action_text = 'برگشت ارجاع'; }
                                     elseif ($h['action'] == 'approve') { $action_class = 'action-approve'; $action_icon = '✅'; $action_text = 'تایید'; }
                                     elseif ($h['action'] == 'reject') { $action_class = 'action-reject'; $action_icon = '❌'; $action_text = 'رد'; }
                                     else { $action_icon = '📌'; $action_text = $h['action']; }
@@ -928,7 +963,6 @@ ob_start();
     </div>
 </div>
 
-<!-- مودال -->
 <div id="fileModal" class="modal" onclick="closeModal()">
     <span class="close-modal" onclick="closeModal()">&times;</span>
     <div class="modal-content" id="modalContent"></div>
@@ -962,7 +996,6 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
 
-// ========== به‌روزرسانی شمارنده‌ها و تغییر وضعیت سند ==========
 function updateCounters() {
     fetch('/invoice-system-v2/ajax/update_counter.php', {
         method: 'POST',
