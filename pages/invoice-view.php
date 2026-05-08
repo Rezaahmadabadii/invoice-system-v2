@@ -58,29 +58,16 @@ $is_holder_department = ($invoice['current_holder_department_id'] && in_array($i
 $is_holder = $is_holder_user || $is_holder_department;
 $is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 
+// ========== دیباگ - بررسی مقادیر ==========
+echo "<!-- DEBUG: user_id=" . $user_id . 
+     " | holder_user_id=" . ($invoice['current_holder_user_id'] ?? 'NULL') . 
+     " | holder_dept_id=" . ($invoice['current_holder_department_id'] ?? 'NULL') . 
+     " | is_holder_user=" . ($is_holder_user ? 'true' : 'false') . 
+     " | is_holder=" . ($is_holder ? 'true' : 'false') . 
+     " | status=" . $invoice['status'] . " -->";
+
 $can_forward = $is_holder && !in_array($invoice['status'], ['approved', 'rejected']);
 $can_approve_reject = ($is_creator || $is_admin) && !in_array($invoice['status'], ['approved', 'rejected']);
-
-$departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-$users = $pdo->query("SELECT id, full_name, username FROM users ORDER BY full_name")->fetchAll();
-
-$history_stmt = $pdo->prepare("
-    SELECT fh.*, 
-           u_from.full_name as from_name,
-           u_to.full_name as to_name,
-           r_to.name as to_department_name
-    FROM forwarding_history fh
-    LEFT JOIN users u_from ON fh.from_user_id = u_from.id
-    LEFT JOIN users u_to ON fh.to_user_id = u_to.id
-    LEFT JOIN roles r_to ON fh.to_department_id = r_to.id
-    WHERE fh.document_id = ?
-    ORDER BY fh.created_at ASC
-");
-$history_stmt->execute([$id]);
-$history = $history_stmt->fetchAll();
-
-$error = '';
-$success = '';
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $action = $_POST['action'] ?? '';
@@ -872,35 +859,6 @@ ob_start();
     <div class="modal-content" id="modalContent"></div>
 </div>
 
-<script>
-function openModal(fileUrl, type) {
-    const modal = document.getElementById('fileModal');
-    const modalContent = document.getElementById('modalContent');
-    if (type === 'image') {
-        modalContent.innerHTML = '<img src="' + fileUrl + '" alt="تصویر فاکتور">';
-    } else if (type === 'pdf') {
-        modalContent.innerHTML = '<iframe src="' + fileUrl + '"></iframe>';
-    }
-    modal.style.display = 'block';
-    document.body.style.overflow = 'hidden';
-}
-
-function closeModal() {
-    const modal = document.getElementById('fileModal');
-    const modalContent = document.getElementById('modalContent');
-    modal.style.display = 'none';
-    modalContent.innerHTML = '';
-    document.body.style.overflow = 'auto';
-}
-
-document.getElementById('fileModal').addEventListener('click', function(e) {
-    if (e.target === this) closeModal();
-});
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeModal();
-});
-
-// ========== به‌روزرسانی شمارنده‌ها ==========
 <script>
 function openModal(fileUrl, type) {
     const modal = document.getElementById('fileModal');

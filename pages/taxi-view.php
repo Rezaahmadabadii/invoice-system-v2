@@ -962,34 +962,6 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
 
-<script>
-function openModal(fileUrl, type) {
-    const modal = document.getElementById('fileModal');
-    const modalContent = document.getElementById('modalContent');
-    if (type === 'image') {
-        modalContent.innerHTML = '<img src="' + fileUrl + '" alt="تصویر سند">';
-    } else if (type === 'pdf') {
-        modalContent.innerHTML = '<iframe src="' + fileUrl + '"></iframe>';
-    }
-    modal.style.display = 'block';
-    document.body.style.overflow = 'hidden';
-}
-
-function closeModal() {
-    const modal = document.getElementById('fileModal');
-    const modalContent = document.getElementById('modalContent');
-    modal.style.display = 'none';
-    modalContent.innerHTML = '';
-    document.body.style.overflow = 'auto';
-}
-
-document.getElementById('fileModal').addEventListener('click', function(e) {
-    if (e.target === this) closeModal();
-});
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeModal();
-});
-
 // ========== به‌روزرسانی شمارنده‌ها و تغییر وضعیت سند ==========
 function updateCounters() {
     fetch('/invoice-system-v2/ajax/update_counter.php', {
