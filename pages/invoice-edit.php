@@ -48,12 +48,20 @@ if ($invoice['created_by'] != $_SESSION['user_id']) {
     exit;
 }
 
+// ========== دریافت وضعیت فعلی فاکتور ==========
+$current_status = $invoice['status'];
+$is_draft = ($current_status == 'draft');
+// =============================================
+
 // دریافت لیست‌های مورد نیاز
 $companies = $pdo->query("SELECT id, name, short_name FROM companies ORDER BY name")->fetchAll();
 $vendors = $pdo->query("SELECT id, name, contract_number, national_id FROM vendors ORDER BY name")->fetchAll();
 $workshops = $pdo->query("SELECT id, name FROM workshops ORDER BY name")->fetchAll();
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-$users = $pdo->query("SELECT id, full_name, username FROM users ORDER BY full_name")->fetchAll();
+$user_id = $_SESSION['user_id'];
+$users_stmt = $pdo->prepare("SELECT id, full_name, username FROM users WHERE id != ? ORDER BY full_name");
+$users_stmt->execute([$user_id]);
+$users = $users_stmt->fetchAll();
 
 $error = '';
 $success = '';
@@ -62,151 +70,206 @@ $duplicate_warning = '';
 // استخراج شماره فاکتور ساده از document_number (حذف مخفف شرکت)
 $simple_invoice_number = preg_replace('/^[^-]+-/', '', $invoice['document_number']);
 
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_invoice'])) {
-    $invoice_number = trim($_POST['invoice_number'] ?? '');
-    $invoice_date = trim($_POST['invoice_date'] ?? '');
-    $company_id = $_POST['company_id'] ?? '';
-    $vendor_id = $_POST['vendor_id'] ?? '';
-    $workshop_id = $_POST['workshop_id'] ?? '';
-    $contract_number = trim($_POST['contract_number'] ?? '');
-    $amount = str_replace(',', '', $_POST['amount'] ?? 0);
-    $discount = str_replace(',', '', $_POST['discount'] ?? 0);
-    $total = str_replace(',', '', $_POST['total'] ?? 0);
-    $vat = isset($_POST['vat']) ? 1 : 0;
-    $description = trim($_POST['description'] ?? '');
-    $force_save = isset($_POST['force_save']) ? 1 : 0;
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    // تشخیص نوع ذخیره
+    $is_complete = isset($_POST['complete_invoice']); // دکمه تکمیل از صفحه view
+    $is_save_draft = isset($_POST['save_draft']); // ذخیره به عنوان پیش‌نویس
+    $is_edit = isset($_POST['edit_invoice']); // ذخیره تغییرات عادی
     
-    $forward_to_department = $_POST['forward_to_department'] ?? '';
-    $forward_to_user = $_POST['forward_to_user'] ?? '';
-    
-    $errors = [];
-    
-    // اعتبارسنجی
-    if (empty($invoice_number)) $errors[] = 'شماره فاکتور الزامی است';
-    if (empty($invoice_date)) $errors[] = 'تاریخ فاکتور الزامی است';
-    if (empty($company_id)) $errors[] = 'انتخاب شرکت الزامی است';
-    if (empty($vendor_id)) $errors[] = 'انتخاب فروشنده الزامی است';
-    if (empty($amount) || $amount <= 0) $errors[] = 'مبلغ باید بزرگتر از صفر باشد';
-    if (empty($forward_to_department) && empty($forward_to_user)) {
-        $errors[] = 'لطفاً حداقل یکی از فیلدهای ارجاع را انتخاب کنید';
-    }
-    
-    // دریافت مخفف شرکت
-    $companyInfo = $pdo->prepare("SELECT short_name FROM companies WHERE id = ?");
-    $companyInfo->execute([$company_id]);
-    $companyData = $companyInfo->fetch();
-    $short_name = $companyData['short_name'] ?? '';
-    $final_invoice_number = !empty($short_name) ? $short_name . '-' . $invoice_number : $invoice_number;
-    
-    // بررسی آپلود فایل جدید
-    $file_path = $invoice['file_path'];
-    $file_name = $invoice['file_name'];
-    
-    if (isset($_FILES['invoice_file']) && $_FILES['invoice_file']['error'] == UPLOAD_ERR_OK) {
-        $allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
-        $max_size = 5 * 1024 * 1024;
-        if (!in_array($_FILES['invoice_file']['type'], $allowed_types)) {
-            $errors[] = 'نوع فایل باید JPEG، PNG یا PDF باشد';
-        }
-        if ($_FILES['invoice_file']['size'] > $max_size) {
-            $errors[] = 'حجم فایل نباید بیشتر از ۵ مگابایت باشد';
+    // اگر هیچ دکمه‌ای زده نشده، ادامه نده
+    if (!$is_complete && !$is_save_draft && !$is_edit) {
+        // هیچ اقدامی نکن
+    } else {
+        $invoice_number = trim($_POST['invoice_number'] ?? '');
+        $invoice_date = trim($_POST['invoice_date'] ?? '');
+        $company_id = $_POST['company_id'] ?? '';
+        $vendor_id = $_POST['vendor_id'] ?? '';
+        $workshop_id = $_POST['workshop_id'] ?? '';
+        $contract_number = trim($_POST['contract_number'] ?? '');
+        $amount = str_replace(',', '', $_POST['amount'] ?? 0);
+        $discount = str_replace(',', '', $_POST['discount'] ?? 0);
+        $total = str_replace(',', '', $_POST['total'] ?? 0);
+        $vat = isset($_POST['vat']) ? 1 : 0;
+        $description = trim($_POST['description'] ?? '');
+        $force_save = isset($_POST['force_save']) ? 1 : 0;
+        
+        $forward_to_department = $_POST['forward_to_department'] ?? '';
+        $forward_to_user = $_POST['forward_to_user'] ?? '';
+        
+        $errors = [];
+        
+        // اعتبارسنجی
+        if (empty($invoice_number)) $errors[] = 'شماره فاکتور الزامی است';
+        if (empty($invoice_date)) $errors[] = 'تاریخ فاکتور الزامی است';
+        if (empty($company_id)) $errors[] = 'انتخاب شرکت الزامی است';
+        if (empty($vendor_id)) $errors[] = 'انتخاب فروشنده الزامی است';
+        if (empty($amount) || $amount <= 0) $errors[] = 'مبلغ باید بزرگتر از صفر باشد';
+        
+        // برای تکمیل پیش‌نویس، ارجاع الزامی است
+        if ($is_complete && empty($forward_to_department) && empty($forward_to_user)) {
+            $errors[] = 'لطفاً حداقل یکی از فیلدهای ارجاع را انتخاب کنید';
         }
         
-        if (empty($errors)) {
-            $upload_dir = __DIR__ . '/../uploads/invoices/';
-            if (!file_exists($upload_dir)) mkdir($upload_dir, 0777, true);
-            $file_ext = pathinfo($_FILES['invoice_file']['name'], PATHINFO_EXTENSION);
-            $new_file_name = $final_invoice_number . '.' . $file_ext;
-            $file_path = 'uploads/invoices/' . $new_file_name;
-            $file_name = $_FILES['invoice_file']['name'];
-            
-            if ($invoice['file_path'] && file_exists(__DIR__ . '/../' . $invoice['file_path'])) {
-                unlink(__DIR__ . '/../' . $invoice['file_path']);
+        // دریافت مخفف شرکت
+        $companyInfo = $pdo->prepare("SELECT short_name FROM companies WHERE id = ?");
+        $companyInfo->execute([$company_id]);
+        $companyData = $companyInfo->fetch();
+        $short_name = $companyData['short_name'] ?? '';
+        $final_invoice_number = !empty($short_name) ? $short_name . '-' . $invoice_number : $invoice_number;
+        
+        // بررسی آپلود فایل جدید
+        $file_path = $invoice['file_path'];
+        $file_name = $invoice['file_name'];
+        
+        if (isset($_FILES['invoice_file']) && $_FILES['invoice_file']['error'] == UPLOAD_ERR_OK) {
+            $allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+            $max_size = 5 * 1024 * 1024;
+            if (!in_array($_FILES['invoice_file']['type'], $allowed_types)) {
+                $errors[] = 'نوع فایل باید JPEG، PNG یا PDF باشد';
+            }
+            if ($_FILES['invoice_file']['size'] > $max_size) {
+                $errors[] = 'حجم فایل نباید بیشتر از ۵ مگابایت باشد';
             }
             
-            if (!move_uploaded_file($_FILES['invoice_file']['tmp_name'], $upload_dir . $new_file_name)) {
-                $errors[] = 'خطا در آپلود فایل';
+            if (empty($errors)) {
+                $upload_dir = __DIR__ . '/../uploads/invoices/';
+                if (!file_exists($upload_dir)) mkdir($upload_dir, 0777, true);
+                $file_ext = pathinfo($_FILES['invoice_file']['name'], PATHINFO_EXTENSION);
+                $new_file_name = $final_invoice_number . '.' . $file_ext;
+                $file_path = 'uploads/invoices/' . $new_file_name;
+                $file_name = $_FILES['invoice_file']['name'];
+                
+                if ($invoice['file_path'] && file_exists(__DIR__ . '/../' . $invoice['file_path'])) {
+                    unlink(__DIR__ . '/../' . $invoice['file_path']);
+                }
+                
+                if (!move_uploaded_file($_FILES['invoice_file']['tmp_name'], $upload_dir . $new_file_name)) {
+                    $errors[] = 'خطا در آپلود فایل';
+                }
             }
         }
-    }
-    
-    // بررسی تکراری بودن
-    if (empty($errors) || $force_save) {
-        $check = $pdo->prepare("SELECT id FROM documents WHERE document_number = ? AND type = 'invoice' AND id != ?");
-        $check->execute([$final_invoice_number, $id]);
-        $existing = $check->fetch();
-        if ($existing && !$force_save) {
-            $duplicate_warning = 'این شماره فاکتور قبلاً ثبت شده است. آیا مطمئن هستید؟';
-        }
-    }
-    
-    if (empty($errors) && (empty($duplicate_warning) || $force_save)) {
-        $amount_clean = floatval(str_replace(',', '', $amount));
-        $discount_clean = floatval(str_replace(',', '', $discount));
-        $final_amount = $amount_clean - $discount_clean;
-        if ($vat) {
-            $final_amount = $final_amount + ($amount_clean * 0.1);
-        }
         
-        $update_sql = "
-            UPDATE documents SET 
-                document_number = ?,
-                title = ?,
-                description = ?,
-                amount = ?,
-                company_id = ?,
-                workshop_id = ?,
-                vendor_id = ?,
-                document_date = ?,
-                contract_number = ?,
-                vat = ?,
-                vat_amount = ?,
-                file_path = ?,
-                file_name = ?,
-                current_holder_department_id = ?,
-                current_holder_user_id = ?
-            WHERE id = ?
-        ";
-        
-        $stmt = $pdo->prepare($update_sql);
-        $result = $stmt->execute([
-            $final_invoice_number,
-            'فاکتور شماره ' . $invoice_number,
-            $description,
-            $total > 0 ? $total : $final_amount,
-            $company_id,
-            $workshop_id ?: null,
-            $vendor_id ?: null,
-            $invoice_date,
-            $contract_number ?: null,
-            $vat,
-            $vat ? ($amount_clean * 0.1) : 0,
-            $file_path,
-            $file_name,
-            $forward_to_department ?: null,
-            $forward_to_user ?: null,
-            $id
-        ]);
-        
-        if ($result) {
-            if ($forward_to_department != $invoice['current_holder_department_id'] || $forward_to_user != $invoice['current_holder_user_id']) {
-                $forward_stmt = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action) VALUES (?, ?, ?, ?, 'forward')");
-                $forward_stmt->execute([$id, $_SESSION['user_id'], $forward_to_department ?: null, $forward_to_user ?: null]);
+        // بررسی تکراری بودن
+        if (!$is_save_draft && empty($errors)) {
+            $check = $pdo->prepare("SELECT id FROM documents WHERE document_number = ? AND type = 'invoice' AND id != ?");
+            $check->execute([$final_invoice_number, $id]);
+            $existing = $check->fetch();
+            if ($existing && !$force_save) {
+                $duplicate_warning = 'این شماره فاکتور قبلاً ثبت شده است. آیا مطمئن هستید؟';
             }
-            logActivity($_SESSION['user_id'], 'edit_invoice', "فاکتور ویرایش شد: $invoice_number", $id);
-            $_SESSION['message'] = 'فاکتور با موفقیت ویرایش شد. شماره فاکتور: ' . $final_invoice_number;
-            $_SESSION['message_type'] = 'success';
-            header('Location: inbox.php');
-            exit;
-        } else {
-            $errors[] = 'خطا در ویرایش فاکتور';
         }
-    }
-    
-    if (!empty($errors)) {
-        $error = implode('<br>', $errors);
-    }
-}
+        
+        if (empty($errors) && (empty($duplicate_warning) || $force_save)) {
+            $amount_clean = floatval(str_replace(',', '', $amount));
+            $discount_clean = floatval(str_replace(',', '', $discount));
+            $final_amount = $amount_clean - $discount_clean;
+            if ($vat) {
+                $final_amount = $final_amount + ($amount_clean * 0.1);
+            }
+            
+            // ========== تعیین وضعیت بر اساس دکمه ==========
+            if ($is_complete && $current_status == 'draft') {
+                $new_status = 'pending';
+            } elseif ($is_save_draft) {
+                $new_status = 'draft';
+            } else {
+                $new_status = $current_status;
+            }
+            // =============================================
+            
+            $update_sql = "
+                UPDATE documents SET 
+                    document_number = ?,
+                    title = ?,
+                    description = ?,
+                    amount = ?,
+                    company_id = ?,
+                    workshop_id = ?,
+                    vendor_id = ?,
+                    document_date = ?,
+                    contract_number = ?,
+                    vat = ?,
+                    vat_amount = ?,
+                    file_path = ?,
+                    file_name = ?,
+                    current_holder_department_id = ?,
+                    current_holder_user_id = ?,
+                    status = ?,
+                    updated_at = NOW()
+                WHERE id = ?
+            ";
+            
+            $stmt = $pdo->prepare($update_sql);
+            $result = $stmt->execute([
+                $final_invoice_number,
+                'فاکتور شماره ' . $invoice_number,
+                $description,
+                $total > 0 ? $total : $final_amount,
+                $company_id,
+                $workshop_id ?: null,
+                $vendor_id ?: null,
+                $invoice_date,
+                $contract_number ?: null,
+                $vat,
+                $vat ? ($amount_clean * 0.1) : 0,
+                $file_path,
+                $file_name,
+                $forward_to_department ?: null,
+                $forward_to_user ?: null,
+                $new_status,
+                $id
+            ]);
+            
+            if ($result) {
+                // اگر از پیش‌نویس به pending تبدیل شد، ارجاع ثبت شود
+                if ($is_complete && $current_status == 'draft') {
+                    $forward_stmt = $pdo->prepare("
+                        INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) 
+                        VALUES (?, ?, ?, ?, 'forward', ?)
+                    ");
+                    $forward_stmt->execute([
+                        $id, 
+                        $_SESSION['user_id'], 
+                        $forward_to_department ?: null, 
+                        $forward_to_user ?: null,
+                        'تکمیل پیش‌نویس و ارسال'
+                    ]);
+                } elseif (($forward_to_department != $invoice['current_holder_department_id'] || $forward_to_user != $invoice['current_holder_user_id']) && !$is_save_draft) {
+                    $forward_stmt = $pdo->prepare("
+                        INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) 
+                        VALUES (?, ?, ?, ?, 'forward', ?)
+                    ");
+                    $forward_stmt->execute([
+                        $id, 
+                        $_SESSION['user_id'], 
+                        $forward_to_department ?: null, 
+                        $forward_to_user ?: null,
+                        'ویرایش و تغییر ارجاع'
+                    ]);
+                }
+                
+                logActivity($_SESSION['user_id'], 'edit_invoice', "فاکتور ویرایش شد: $invoice_number", $id);
+                
+                if ($is_complete) {
+                    $_SESSION['message'] = '✅ فاکتور با موفقیت تکمیل و ارسال شد.';
+                } elseif ($is_save_draft) {
+                    $_SESSION['message'] = '📝 پیش‌نویس با موفقیت ذخیره شد.';
+                } else {
+                    $_SESSION['message'] = '✏️ فاکتور با موفقیت ویرایش شد. شماره فاکتور: ' . $final_invoice_number;
+                }
+                $_SESSION['message_type'] = 'success';
+                header('Location: inbox.php');
+                exit;
+            } else {
+                $errors[] = 'خطا در ویرایش فاکتور';
+            }
+        }
+        
+        if (!empty($errors)) {
+            $error = implode('<br>', $errors);
+        }
+    } // پایان else (هیچ دکمه‌ای زده نشده)
+} // پایان if ($_SERVER['REQUEST_METHOD'] == 'POST')
 
 $page_title = 'ویرایش فاکتور';
 ob_start();
@@ -440,10 +503,21 @@ ob_start();
         color: white;
         box-shadow: 0 2px 8px rgba(99,102,241,0.3);
     }
-    
+
     .btn-primary:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(99,102,241,0.4);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(99,102,241,0.4);
+    }
+
+    .btn-draft {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+        color: white;
+        box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
+    }
+
+    .btn-draft:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(245, 158, 11, 0.4);
     }
     
     .btn-outline {
@@ -673,21 +747,39 @@ ob_start();
                 </div>
                 <div class="card-body">
                     <?php if (!empty($invoice['file_path']) && file_exists(__DIR__ . '/../' . $invoice['file_path'])): 
-                        $file_url = '/invoice-system-v2/' . $invoice['file_path'];
+                        $full_path = __DIR__ . '/../' . $invoice['file_path'];
                         $file_ext = strtolower(pathinfo($invoice['file_path'], PATHINFO_EXTENSION));
                         $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
+                        
+                        // برای تصاویر، محتوا را به base64 تبدیل کن
+                        if ($is_image) {
+                            $image_data = file_get_contents($full_path);
+                            $base64 = base64_encode($image_data);
+                            $image_src = 'data:image/' . $file_ext . ';base64,' . $base64;
+                        } else {
+                            $web_path = str_replace('\\', '/', $invoice['file_path']);
+                            $web_path = str_replace('invoice-system-v2/', '', $web_path);
+                            $image_src = '/invoice-system-v2/' . $web_path;
+                        }
                     ?>
                         <div class="current-file">
                             <strong>📎 فایل ضمیمه فعلی:</strong>
                             <?php if ($is_image): ?>
-                                <div style="margin-top: 8px;"><img src="<?php echo $file_url; ?>" alt="پیش‌نمایش" style="max-width: 80px; border-radius: 8px;"></div>
+                                <div style="margin-top: 8px;">
+                                    <img src="<?php echo $image_src; ?>" alt="پیش‌نمایش" style="max-width: 150px; max-height: 150px; border-radius: 8px; border: 1px solid #ddd;">
+                                    <br>
+                                    <small style="font-size: 10px;">مسیر: <?php echo htmlspecialchars($invoice['file_path']); ?></small>
+                                </div>
                             <?php else: ?>
-                                <div style="margin-top: 8px;"><a href="<?php echo $file_url; ?>" target="_blank">📄 <?php echo htmlspecialchars($invoice['file_name'] ?? basename($invoice['file_path'])); ?></a></div>
+                                <div style="margin-top: 8px;">
+                                    <a href="<?php echo $image_src; ?>" target="_blank" style="color: #3498db;">
+                                        📄 <?php echo htmlspecialchars($invoice['file_name'] ?? basename($invoice['file_path'])); ?>
+                                    </a>
+                                </div>
                             <?php endif; ?>
                             <small class="help-text">در صورت آپلود فایل جدید، فایل قبلی جایگزین می‌شود</small>
                         </div>
-                    <?php endif; ?>
-                    
+                    <?php endif; ?>                 
                     <div class="form-group">
                         <label>آپلود فایل جدید (اختیاری)</label>
                         <input type="file" name="invoice_file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf">
@@ -759,7 +851,18 @@ ob_start();
         </div>
         
         <div class="form-actions">
-            <button type="submit" name="edit_invoice" value="1" class="btn btn-primary"><i class="fas fa-save"></i> ذخیره تغییرات</button>
+            <?php if ($is_draft): ?>
+                <button type="submit" name="save_draft" value="1" class="btn btn-draft">
+                    <i class="fas fa-save"></i> ذخیره پیش‌نویس
+                </button>
+                <button type="submit" name="complete_invoice" value="1" class="btn btn-primary">
+                    <i class="fas fa-check-circle"></i> تکمیل و ارسال
+                </button>
+            <?php else: ?>
+                <button type="submit" name="edit_invoice" value="1" class="btn btn-primary">
+                    <i class="fas fa-save"></i> ذخیره تغییرات
+                </button>
+            <?php endif; ?>
             <a href="invoice-view.php?id=<?php echo $id; ?>" class="btn btn-outline">انصراف</a>
         </div>
     </form>

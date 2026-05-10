@@ -24,7 +24,10 @@ $companies = $pdo->query("SELECT id, name, short_name FROM companies ORDER BY na
 $vendors = $pdo->query("SELECT id, name, contract_number, national_id FROM vendors ORDER BY name")->fetchAll();
 $workshops = $pdo->query("SELECT id, name FROM workshops ORDER BY name")->fetchAll();
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-$users = $pdo->query("SELECT id, full_name, username FROM users ORDER BY full_name")->fetchAll();
+$user_id = $_SESSION['user_id'];
+$users = $pdo->prepare("SELECT id, full_name, username FROM users WHERE id != ? ORDER BY full_name");
+$users->execute([$user_id]);
+$users = $users->fetchAll();
 
 $error = '';
 $success = '';

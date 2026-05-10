@@ -58,6 +58,18 @@ if ($selected_year && $selected_month) {
     $params[] = $end_date_greg;
 }
 
+// تشخیص ادمین بودن کاربر
+$user_roles = $_SESSION['user_roles'] ?? [];
+if (empty($user_roles) && isset($_SESSION['user_id'])) {
+    $stmt = $pdo->prepare("SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = ?");
+    $stmt->execute([$_SESSION['user_id']]);
+    $user_roles = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $_SESSION['user_roles'] = $user_roles;
+}
+
+$is_admin_user = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
+$is_admin_flag = $is_admin_user ? 'admin' : 'no';
+
 // کوئری اصلی با دسترسی‌های کاربر
 $sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
                holder_dep.name as holder_department_name,
@@ -68,11 +80,29 @@ $sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
         LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
         LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
         WHERE d.type = 'invoice'
-        AND (d.created_by = ? OR d.current_holder_user_id = ? OR d.current_holder_department_id = ?)
+        AND (
+            ? = 'admin'
+            OR d.created_by = ? 
+            OR d.current_holder_user_id = ? 
+            OR d.current_holder_department_id = ?
+            OR (
+                d.status = 'forwarded'
+                AND EXISTS (
+                    SELECT 1 FROM forwarding_history fh 
+                    WHERE fh.document_id = d.id 
+                    AND fh.from_user_id = ?
+                    AND fh.action = 'forward'
+                    AND fh.created_at = (
+                        SELECT MAX(created_at) FROM forwarding_history 
+                        WHERE document_id = d.id AND action = 'forward'
+                    )
+                )
+            )
+        )
         $date_condition";
 
-// پارامترها: سه مقدار اول برای سه شرط بالا
-$params = array_merge([$user_id, $user_id, $_SESSION['user_department_id'] ?? null], $params);
+// پارامترها: شرط ادمین + سه شرط اصلی + شرط آخرین ارسال‌کننده
+$params = array_merge([$is_admin_flag, $user_id, $user_id, $_SESSION['user_department_id'] ?? null, $user_id], $params);
 
 if ($filter_company) {
     $sql .= " AND d.company_id = ?";
@@ -533,7 +563,10 @@ ob_start();
                 </div>
                 
                 <div class="card-actions">
-                    <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات"><i class="fas fa-eye"></i></a>
+                    <?php if (!$isDraft): ?>
+                        <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات"><i class="fas fa-eye"></i></a>
+                    <?php endif; ?>
+                    
                     <?php if (!empty($inv['file_path'])):
                         $file_ext = strtolower(pathinfo($inv['file_path'], PATHINFO_EXTENSION));
                         $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
@@ -551,13 +584,33 @@ ob_start();
                             <i class="fas <?php echo $file_icon; ?>"></i>
                         </button>
                     <?php endif; ?>
-                    <?php if ($inv['created_by'] == $user_id): ?>
+                    
+                    <?php if ($inv['created_by'] == $user_id || $is_admin_user): ?>
                         <?php if ($isDraft): ?>
                             <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn finalize" title="تکمیل"><i class="fas fa-check-circle"></i> تکمیل</a>
                         <?php else: ?>
                             <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش"><i class="fas fa-edit"></i></a>
                         <?php endif; ?>
-                        <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')"><i class="fas fa-trash-alt"></i></a>
+                        
+                        <?php 
+                        // وضعیت‌های قابل حذف برای ایجادکننده غیر ادمین
+                        $deletable_statuses = ['draft', 'forwarded', 'pending'];
+                        $is_admin_user = (!empty($user_roles) && (in_array('admin', $user_roles) || in_array('super_admin', $user_roles)));
+                        
+                        $can_delete_this = false;
+                        
+                        // ادمین همیشه می‌تواند دکمه حذف را ببیند (رمز در صفحه حذف بررسی می‌شود)
+                        if ($is_admin_user) {
+                            $can_delete_this = true;
+                        } 
+                        // ایجادکننده غیر ادمین فقط فاکتورهای با وضعیت مجاز
+                        elseif ($inv['created_by'] == $user_id && in_array($inv['status'], $deletable_statuses)) {
+                            $can_delete_this = true;
+                        }
+                        ?>
+                        <?php if ($can_delete_this): ?>
+                            <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')"><i class="fas fa-trash-alt"></i></a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>

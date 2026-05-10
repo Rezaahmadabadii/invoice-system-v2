@@ -29,18 +29,27 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// اطمینان از مقداردهی نشست کاربر
-if (!isset($_SESSION['user_role_ids']) && isset($_SESSION['user_id'])) {
-    $stmt = $pdo->prepare("SELECT role_id FROM user_roles WHERE user_id = ?");
-    $stmt->execute([$_SESSION['user_id']]);
-    $_SESSION['user_role_ids'] = $stmt->fetchAll(PDO::FETCH_COLUMN);
+// ========== دریافت اطلاعات کاربر از سشن ==========
+$user_id = $_SESSION['user_id'] ?? 0;
+$user_department_id = $_SESSION['user_department_id'] ?? null;
+$user_roles = $_SESSION['user_roles'] ?? [];
+
+// اگر user_roles خالی است، از دیتابیس بخوان
+if (empty($user_roles) && $user_id > 0) {
+    $stmt = $pdo->prepare("SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = ?");
+    $stmt->execute([$user_id]);
+    $user_roles = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $_SESSION['user_roles'] = $user_roles;
 }
 
-if (!isset($_SESSION['user_department_id']) && isset($_SESSION['user_id'])) {
+// اگر user_department_id خالی است، از دیتابیس بخوان
+if (!$user_department_id && $user_id > 0) {
     $stmt = $pdo->prepare("SELECT department_id FROM users WHERE id = ?");
-    $stmt->execute([$_SESSION['user_id']]);
-    $_SESSION['user_department_id'] = $stmt->fetchColumn();
+    $stmt->execute([$user_id]);
+    $user_department_id = $stmt->fetchColumn();
+    $_SESSION['user_department_id'] = $user_department_id;
 }
+// =================================================
 
 $stmt = $pdo->prepare("
     SELECT d.*, 
@@ -66,10 +75,7 @@ if (!$invoice) {
     exit;
 }
 
-$user_id = $_SESSION['user_id'];
-$user_roles = $_SESSION['user_roles'] ?? [];
-$user_department_id = $_SESSION['user_department_id'] ?? null;
-
+// بقیه کدهای متغیرها (is_creator, is_holder و ...)
 $is_creator = ($invoice['created_by'] == $user_id);
 $is_holder_user = ($invoice['current_holder_user_id'] == $user_id);
 $is_holder_department = ($invoice['current_holder_department_id'] == $user_department_id);
@@ -77,12 +83,21 @@ $is_holder = ($is_holder_user || $is_holder_department);
 $is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 
 $is_locked = in_array($invoice['status'], ['approved', 'rejected']);
+$is_draft = ($invoice['status'] == 'draft');
 
-$can_forward = $is_holder && !$is_locked;
-$can_approve_reject = ($is_creator || $is_admin) && !$is_locked;
-$can_cancel_forward = ($is_creator && $invoice['status'] == 'forwarded' && !$is_holder && !$is_locked);
+$can_forward = $is_holder && !$is_locked && !$is_draft;
+$can_approve_reject = ($is_creator || $is_admin) && !$is_locked && !$is_draft;
+$can_cancel_forward = ($is_creator && $invoice['status'] == 'forwarded' && !$is_holder && !$is_locked && !$is_draft);
+$can_return_to_sender = false; // پیش‌نویس این گزینه را هم ندارد
 
-// امکان برگشت به ارسال‌کننده (برای گیرنده قبل از اقدام)
+// اگر پیش‌نویس است، همه اقدامات غیرفعال شوند
+if ($is_draft) {
+    $can_forward = false;
+    $can_approve_reject = false;
+    $can_cancel_forward = false;
+    $can_return_to_sender = false;
+}
+// گیرنده می‌تواند به ارسال‌کننده برگرداند
 $can_return_to_sender = false;
 if (!$is_locked && $is_holder && $invoice['status'] == 'forwarded') {
     $last_sender_stmt = $pdo->prepare("
@@ -95,11 +110,27 @@ if (!$is_locked && $is_holder && $invoice['status'] == 'forwarded') {
     $can_return_to_sender = ($last_sender && $last_sender != $user_id);
 }
 
-// دریافت لیست بخش‌ها و کاربران
+// دریافت لیست بخش‌ها و کاربران (به جز خود کاربر)
 $departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-$users_stmt = $pdo->prepare("SELECT id, full_name, username FROM users WHERE id != ? ORDER BY full_name");
+
+$users_stmt = $pdo->prepare("
+    SELECT id, full_name, username 
+    FROM users 
+    WHERE id != ? 
+    ORDER BY full_name
+");
 $users_stmt->execute([$user_id]);
 $users = $users_stmt->fetchAll();
+
+// دیباگ در کنسول جاوااسکریپت
+$debug_data = [
+    'current_user_id' => $user_id,
+    'other_users_count' => count($users),
+    'other_users_list' => array_map(function($u) {
+        return ['id' => $u['id'], 'name' => $u['full_name']];
+    }, $users)
+];
+echo "<script>console.log('🔍 دیباگ ارجاع:', " . json_encode($debug_data, JSON_PRETTY_PRINT) . ");</script>";
 
 $history_stmt = $pdo->prepare("
     SELECT fh.*, 
@@ -157,11 +188,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         } elseif (empty($notes)) {
             $error = 'لطفاً دلیل برگشت ارجاع را وارد کنید';
         } else {
+            // پیدا کردن آخرین ارسال‌کننده
+            $last_sender_stmt = $pdo->prepare("
+                SELECT from_user_id FROM forwarding_history 
+                WHERE document_id = ? AND action = 'forward' 
+                ORDER BY created_at DESC LIMIT 1
+            ");
+            $last_sender_stmt->execute([$id]);
+            $original_sender = $last_sender_stmt->fetchColumn();
+            
             $update = $pdo->prepare("UPDATE documents SET current_holder_user_id = ?, current_holder_department_id = NULL, status = 'pending' WHERE id = ?");
-            $update->execute([$invoice['created_by'], $id]);
+            $update->execute([$original_sender, $id]);
             
             $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_user_id, action, notes) VALUES (?, ?, ?, 'cancel_forward', ?)");
-            $insert->execute([$id, $_SESSION['user_id'], $invoice['created_by'], $notes]);
+            $insert->execute([$id, $_SESSION['user_id'], $original_sender, $notes]);
             
             $success = 'ارجاع فاکتور با موفقیت برگشت داده شد.';
             echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
@@ -746,28 +786,44 @@ ob_start();
     </div>
     <?php endif; ?>
     
-    <?php if ($can_forward || $can_approve_reject || $can_cancel_forward): ?>
+    <?php if ($invoice['description']): ?>
+    <div class="info-card" style="margin-bottom: 24px;">
+        <div class="card-header">
+            <i class="fas fa-align-right"></i>
+            <h3>توضیحات فاکتور</h3>
+        </div>
+        <div class="card-body">
+            <div style="font-size: 13px; color: var(--text-main); line-height: 1.6;"><?php echo nl2br(htmlspecialchars($invoice['description'])); ?></div>
+        </div>
+    </div>
+    <?php endif; ?>
+    
+    <?php if ($is_draft && $is_creator): ?>
+    <div class="action-form" style="background: #fef3c7; text-align: center; border: 1px solid #fde68a;">
+        <p style="margin-bottom: 15px;">📝 این فاکتور در حالت پیش‌نویس است.</p>
+        <div style="display: flex; gap: 10px; justify-content: center;">
+            <form method="POST" action="invoice-edit.php?id=<?php echo $id; ?>" style="display: inline-block; margin: 0;">
+                <input type="hidden" name="complete_invoice" value="1">
+                <button type="submit" class="btn" style="background: #f59e0b; color: white; padding: 8px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px;">
+                    ✏️ تکمیل و ارسال
+                </button>
+            </form>
+            <?php 
+            // وضعیت‌های قابل حذف: draft, forwarded, pending
+            $deletable_statuses = ['draft', 'forwarded', 'pending'];
+            if (in_array($invoice['status'], $deletable_statuses)): ?>
+                <a href="invoice-delete.php?id=<?php echo $id; ?>" class="btn" style="background: #ef4444; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none;" onclick="return confirm('حذف شود؟')">
+                    🗑️ حذف پیش‌نویس
+                </a>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
+	
+    <?php if ($can_forward || $can_approve_reject): ?>
     <div class="action-form">
         <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-bolt" style="color: var(--accent);"></i> اقدامات روی فاکتور</h3>
         
-        <!-- دکمه جداگانه برگشت به ارسال‌کننده -->
-        <?php if ($can_return_to_sender): ?>
-            <div style="background: #fef3c7; border: 1px solid #fde68a; border-radius: 16px; padding: 15px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
-                <div>
-                    <i class="fas fa-undo-alt" style="color: #d97706; font-size: 20px;"></i>
-                    <strong style="color: #92400e; margin-right: 8px;">آیا این فایل به اشتباه برای شما ارسال شده است؟</strong>
-                    <span style="color: #78350f; font-size: 13px;">با کلیک روی دکمه زیر، فایل به ارسال‌کننده برگشت داده می‌شود.</span>
-                </div>
-                <form method="POST" onsubmit="return confirm('آیا از برگشت این فایل به ارسال‌کننده اطمینان دارید؟')">
-                    <input type="hidden" name="action" value="return_to_sender">
-                    <textarea name="notes" rows="1" placeholder="دلیل برگشت (اختیاری)..." style="width: 250px; padding: 8px; border-radius: 10px; border: 1px solid #fde68a; margin-left: 10px;"></textarea>
-                    <button type="submit" style="background: #d97706; color: white; border: none; padding: 8px 20px; border-radius: 30px; cursor: pointer; font-weight: bold;">
-                        <i class="fas fa-reply"></i> برگشت به ارسال‌کننده
-                    </button>
-                </form>
-            </div>
-        <?php endif; ?>
-
         <form method="POST" id="actionForm">
             <div class="form-group">
                 <label>انتخاب اقدام <span style="color: var(--danger);">*</span></label>
@@ -775,9 +831,6 @@ ob_start();
                     <option value="">--- انتخاب کنید ---</option>
                     <?php if ($can_forward): ?>
                         <option value="forward">🔄 بررسی و پیگیری (ارجاع)</option>
-                    <?php endif; ?>
-                    <?php if ($can_cancel_forward): ?>
-                        <option value="cancel_forward">↩️ برگشت ارجاع</option>
                     <?php endif; ?>
                     <?php if ($can_approve_reject): ?>
                         <option value="approve">✅ تایید نهایی</option>
@@ -815,20 +868,26 @@ ob_start();
                         <label>👤 انتخاب شخص</label>
                         <select name="to_user" id="forwardUser">
                             <option value="">--- انتخاب کنید ---</option>
-                            <?php foreach ($users as $user): ?>
-                                <option value="<?php echo $user['id']; ?>">👤 <?php echo htmlspecialchars($user['full_name']); ?></option>
-                            <?php endforeach; ?>
+                            <?php 
+                            $other_users = array_filter($users, function($u) use ($user_id) {
+                                return $u['id'] != $user_id;
+                            });
+                            if (count($other_users) > 0):
+                                foreach ($other_users as $user): ?>
+                                    <option value="<?php echo $user['id']; ?>">👤 <?php echo htmlspecialchars($user['full_name']); ?></option>
+                                <?php endforeach; 
+                            else: ?>
+                                <option value="" disabled>هیچ کاربر دیگری یافت نشد</option>
+                            <?php endif; ?>
                         </select>
                     </div>
-                </div>
-            </div>
             
             <div class="form-group">
                 <label>📝 توضیحات <span id="notesRequiredStar" style="color: var(--danger);">*</span></label>
                 <textarea name="notes" id="actionNotes" rows="2" placeholder="توضیحات خود را وارد کنید..."></textarea>
             </div>
             
-            <div style="display: flex; gap: 10px; justify-content: space-between;">
+            <div style="display: flex; gap: 10px;">
                 <button type="submit" class="btn-submit" id="submitBtn">✅ ثبت اقدام</button>
             </div>
         </form>
@@ -849,11 +908,6 @@ ob_start();
                 actionNotes.required = true;
                 notesRequiredStar.style.display = 'inline';
                 actionNotes.placeholder = 'لطفاً دلیل بررسی و پیگیری را وارد کنید...';
-            } else if (val === 'cancel_forward') {
-                forwardFields.style.display = 'none';
-                actionNotes.required = true;
-                notesRequiredStar.style.display = 'inline';
-                actionNotes.placeholder = 'لطفاً دلیل برگشت ارجاع را وارد کنید...';
             } else if (val === 'reject') {
                 forwardFields.style.display = 'none';
                 actionNotes.required = true;
@@ -937,14 +991,40 @@ ob_start();
             }
             
             const notes = actionNotes.value.trim();
-            if ((selectedAction === 'forward' || selectedAction === 'cancel_forward' || selectedAction === 'reject') && notes === '') {
+            if ((selectedAction === 'forward' || selectedAction === 'reject') && notes === '') {
                 e.preventDefault();
                 alert('لطفاً توضیحات را وارد کنید');
                 return false;
             }
         });
     </script>
-<?php endif; ?>
+    <?php endif; ?>
+
+    <?php if ($can_cancel_forward || $can_return_to_sender): ?>
+    <div class="action-form">
+        <div style="display: flex; justify-content: flex-end; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <?php if ($can_cancel_forward): ?>
+                <form method="POST" onsubmit="return confirm('آیا از برگرداندن این فایل به وضعیت قبلی اطمینان دارید؟')" style="margin: 0; display: flex; align-items: center; gap: 8px;">
+                    <input type="hidden" name="action" value="cancel_forward">
+                    <textarea name="notes" rows="1" placeholder="دلیل برگرداندن..." style="width: 160px; padding: 6px 8px; border-radius: 6px; border: 1px solid #fde68a; font-size: 12px; resize: none;"></textarea>
+                    <button type="submit" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap;">
+                        <i class="fas fa-undo-alt"></i> برگرداندن فایل ارسالی
+                    </button>
+                </form>
+            <?php endif; ?>
+            
+            <?php if ($can_return_to_sender): ?>
+                <form method="POST" onsubmit="return confirm('آیا از برگشت این فایل به ارسال‌کننده اطمینان دارید؟')" style="margin: 0;">
+                    <input type="hidden" name="action" value="return_to_sender">
+                    <input type="hidden" name="notes" value="برگشت به ارسال‌کننده">
+                    <button type="submit" style="background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 12px; font-weight: 500;">
+                        <i class="fas fa-reply"></i> برگشت به ارسال‌کننده
+                    </button>
+                </form>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
     
     <div class="info-card">
         <div class="card-header">
