@@ -23,11 +23,17 @@ try {
 $companies = $pdo->query("SELECT id, name, short_name FROM companies ORDER BY name")->fetchAll();
 $vendors = $pdo->query("SELECT id, name, contract_number, national_id FROM vendors ORDER BY name")->fetchAll();
 $workshops = $pdo->query("SELECT id, name FROM workshops ORDER BY name")->fetchAll();
-$departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
+
+// دریافت لیست کاربران فعال (به جز خود کاربر) برای ارجاع چندنفره
 $user_id = $_SESSION['user_id'];
-$users = $pdo->prepare("SELECT id, full_name, username FROM users WHERE id != ? ORDER BY full_name");
-$users->execute([$user_id]);
-$users = $users->fetchAll();
+$users_stmt = $pdo->prepare("
+    SELECT id, full_name, username, department_id 
+    FROM users 
+    WHERE id != ? AND (status = 'active' OR status IS NULL)
+    ORDER BY full_name
+");
+$users_stmt->execute([$user_id]);
+$users = $users_stmt->fetchAll();
 
 $error = '';
 $success = '';
@@ -48,8 +54,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && (isset($_POST['create_invoice']) || 
     $description = trim($_POST['description'] ?? '');
     $force_save = isset($_POST['force_save']) ? 1 : 0;
     
-    $forward_to_department = $_POST['forward_to_department'] ?? '';
-    $forward_to_user = $_POST['forward_to_user'] ?? '';
+    // دریافت کاربران انتخاب شده برای ارجاع
+    $selected_users = $_POST['selected_users'] ?? [];
     
     $errors = [];
     
@@ -59,8 +65,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && (isset($_POST['create_invoice']) || 
     if (empty($company_id)) $errors[] = 'انتخاب شرکت الزامی است';
     if (!$is_draft && empty($vendor_id)) $errors[] = 'انتخاب فروشنده الزامی است';
     if (!$is_draft && (empty($amount) || $amount <= 0)) $errors[] = 'مبلغ باید بزرگتر از صفر باشد';
-    if (!$is_draft && empty($forward_to_department) && empty($forward_to_user)) {
-        $errors[] = 'لطفاً حداقل یکی از فیلدهای ارجاع را انتخاب کنید';
+    
+    // اعتبارسنجی برای حالت غیر پیش‌نویس: حداقل یک کاربر باید انتخاب شود
+    if (!$is_draft && empty($selected_users)) {
+        $errors[] = 'لطفاً حداقل یک کاربر را به عنوان دریافت‌کننده انتخاب کنید';
     }
     
     // بررسی آپلود فایل (در حالت پیش‌نویس اختیاری است)
@@ -109,9 +117,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && (isset($_POST['create_invoice']) || 
             move_uploaded_file($_FILES['invoice_file']['tmp_name'], $upload_dir . $new_file_name);
         }
         
-        // شماره سند داخلی - اصلاح شده (برای پیش‌نویس فقط DRAFT- به اضافه شماره ساده، بدون مخفف تکراری)
+        // شماره سند داخلی
         $doc_number = $is_draft ? 'DRAFT-' . $invoice_number : $final_invoice_number;
-        $status = $is_draft ? 'draft' : 'forwarded';
+        
+        // تعیین وضعیت اولیه فاکتور
+        if ($is_draft) {
+            $status = 'draft';
+            $total_approvers = 0;
+        } else {
+            $status = 'pending_approval';
+            $total_approvers = count($selected_users);
+        }
         
         // محاسبه مبلغ نهایی
         $amount_clean = floatval(str_replace(',', '', $amount));
@@ -139,8 +155,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && (isset($_POST['create_invoice']) || 
             'vat_amount' => $vat ? ($amount_clean * 0.1) : 0,
             'file_path' => $file_path,
             'file_name' => $file_name,
-            'current_holder_department_id' => (!$is_draft && $forward_to_department) ? $forward_to_department : null,
-            'current_holder_user_id' => (!$is_draft && $forward_to_user) ? $forward_to_user : null,
+            'total_approvers' => $total_approvers,
+            'approved_count' => 0,
+            'rejected_count' => 0,
             'created_at' => date('Y-m-d H:i:s')
         ];
         
@@ -155,9 +172,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && (isset($_POST['create_invoice']) || 
         if ($stmt->execute($data)) {
             $doc_id = $pdo->lastInsertId();
             
-            if (!$is_draft && ($forward_to_department || $forward_to_user)) {
-                $forward_stmt = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action) VALUES (?, ?, ?, ?, 'forward')");
-                $forward_stmt->execute([$doc_id, $_SESSION['user_id'], $forward_to_department ?: null, $forward_to_user ?: null]);
+            // ثبت وضعیت برای هر کاربر انتخاب شده (در حالت غیر پیش‌نویس)
+            if (!$is_draft && !empty($selected_users)) {
+                $insert_approval = $pdo->prepare("
+                    INSERT INTO document_approvals (document_id, user_id, status) 
+                    VALUES (?, ?, 'pending')
+                ");
+                
+                $insert_history = $pdo->prepare("
+                    INSERT INTO forwarding_history (document_id, from_user_id, to_user_id, action, notes) 
+                    VALUES (?, ?, ?, 'forward', ?)
+                ");
+                
+                foreach ($selected_users as $uid) {
+                    $insert_approval->execute([$doc_id, $uid]);
+                    $insert_history->execute([$doc_id, $_SESSION['user_id'], $uid, "ارسال فاکتور برای تأیید"]);
+                }
             }
             
             logActivity($_SESSION['user_id'], $is_draft ? 'create_invoice_draft' : 'create_invoice', 
@@ -169,7 +199,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && (isset($_POST['create_invoice']) || 
                 header('Location: inbox.php');
                 exit;
             } else {
-                $success = 'فاکتور با موفقیت ثبت و ارسال شد. شماره فاکتور: ' . $final_invoice_number;
+                $success = 'فاکتور با موفقیت ثبت و برای ' . count($selected_users) . ' نفر ارسال شد. شماره فاکتور: ' . $final_invoice_number;
                 echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 2000);</script>';
             }
         } else {
@@ -257,6 +287,15 @@ ob_start();
         grid-template-columns: repeat(3, 1fr);
         gap: 24px;
         margin-bottom: 24px;
+    }
+    
+    .full-width-card {
+        width: 100%;
+        margin-bottom: 24px;
+    }
+    
+    .full-width-card .form-card {
+        width: 100%;
     }
     
     .form-card {
@@ -351,44 +390,155 @@ ob_start();
         flex-direction: column;
         justify-content: center;
     }
+    
     .total-box .label {
         font-size: 11px;
         color: var(--text-muted);
     }
+    
     .total-box .value {
         font-size: 20px;
         font-weight: bold;
         color: var(--primary);
     }
     
-    .forward-section {
-        background: var(--accent-light);
+    /* ========== گرید چندستونه برای لیست کاربران (برای ردیف سوم قدیمی) ========== */
+    .users-grid-list {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        max-height: 350px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
         border-radius: 16px;
-        padding: 16px;
+        background: white;
+        padding: 12px;
     }
     
-    .radio-group {
-        display: flex;
-        gap: 24px;
-        margin-bottom: 16px;
-        padding-bottom: 12px;
-        border-bottom: 1px dashed #fde68a;
-    }
-    
-    .radio-group label {
+    .user-checkbox-item {
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-size: 12px;
-        font-weight: 500;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 12px;
         cursor: pointer;
+        transition: all 0.2s ease;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
     }
     
-    .radio-group input[type="radio"] {
-        width: 16px;
-        height: 16px;
+    .user-checkbox-item:hover {
+        background: #eef2ff;
+        border-color: var(--primary);
+        transform: translateX(2px);
+    }
+    
+    .user-checkbox-item input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
         margin: 0;
-        accent-color: var(--accent);
+        accent-color: var(--primary);
+        flex-shrink: 0;
+    }
+    
+    .user-checkbox-item .user-info {
+        flex: 1;
+        min-width: 0;
+    }
+    
+    .user-checkbox-item .user-name {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--text-main);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .user-checkbox-item .user-username {
+        font-size: 10px;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    /* ========== گرید عمودی 2 ستونی برای لیست کاربران (نسخه جدید) ========== */
+    .users-grid-list-vertical {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+        max-height: 400px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: white;
+        padding: 12px;
+    }
+    
+    .user-checkbox-item-vertical {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+    }
+    
+    .user-checkbox-item-vertical:hover {
+        background: #eef2ff;
+        border-color: var(--primary);
+        transform: translateX(2px);
+    }
+    
+    .user-checkbox-item-vertical input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+        margin: 0;
+        accent-color: var(--primary);
+        flex-shrink: 0;
+    }
+    
+    .user-checkbox-item-vertical .user-info {
+        flex: 1;
+        min-width: 0;
+    }
+    
+    .user-checkbox-item-vertical .user-name {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--text-main);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .user-checkbox-item-vertical .user-username {
+        font-size: 10px;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    /* ===================================================== */
+    
+    .selected-count-badge {
+        background: var(--primary-light);
+        color: var(--primary);
+        padding: 10px 16px;
+        border-radius: 30px;
+        font-size: 13px;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 16px;
+        transition: all 0.2s;
     }
     
     .form-actions {
@@ -492,25 +642,36 @@ ob_start();
         overflow: hidden;
         width: 30px;
     }
+    
     .coin-icon {
         font-size: 22px;
         display: inline-block;
         transition: all 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
         cursor: pointer;
     }
+    
     .coin-spin-move {
         animation: spinAndMove 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
     }
+    
     @keyframes spinAndMove {
         0% { transform: rotate(0deg) translateX(0); opacity: 1; }
         100% { transform: rotate(360deg) translateX(50px); opacity: 0; }
     }
     
+    /* ========== واکنش‌گرا ========== */
     @media (max-width: 1000px) {
         .three-columns {
             grid-template-columns: repeat(2, 1fr);
         }
+        .users-grid-list {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        .users-grid-list-vertical {
+            grid-template-columns: repeat(2, 1fr);
+        }
     }
+    
     @media (max-width: 900px) {
         .two-columns {
             grid-template-columns: 1fr;
@@ -530,6 +691,16 @@ ob_start();
             text-align: center;
         }
     }
+    
+    @media (max-width: 600px) {
+        .users-grid-list {
+            grid-template-columns: 1fr;
+        }
+        .users-grid-list-vertical {
+            grid-template-columns: 1fr;
+        }
+    }
+    /* ===================================== */
 </style>
 
 <div class="form-wrapper">
@@ -585,6 +756,11 @@ ob_start();
                         <input type="text" name="contract_number" value="<?php echo htmlspecialchars($_POST['contract_number'] ?? ''); ?>" placeholder="اختیاری">
                         <small class="help-text">در صورت وجود قرارداد، شماره آن را وارد کنید</small>
                     </div>
+                    <div class="form-group">
+                        <label>توضیحات فاکتور</label>
+                        <textarea name="description" rows="3" placeholder="توضیحات اضافی (اختیاری)..."><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
+                        <small class="help-text">توضیحات مربوط به فاکتور را وارد کنید</small>
+                    </div>
                 </div>
             </div>
             
@@ -631,10 +807,10 @@ ob_start();
             </div>
         </div>
         
-        <!-- ردیف دوم: اطلاعات مالی + جمع کل (2 ستون) -->
+        <!-- ردیف دوم: اطلاعات مالی + جمع کل (در یک باکس) و لیست دریافت‌کنندگان -->
         <div class="two-columns">
             
-            <!-- کارت 3: اطلاعات مالی -->
+            <!-- کارت 3: اطلاعات مالی + جمع کل -->
             <div class="form-card card-primary">
                 <div class="card-header">
                     <i class="fas fa-money-bill-wave"></i>
@@ -655,31 +831,67 @@ ob_start();
                             ارزش افزوده (۱۰٪)
                         </label>
                     </div>
+                    
+                    <!-- خط جداکننده -->
+                    <hr style="margin: 20px 0; border: none; border-top: 2px dashed var(--border);">
+                    
+                    <!-- جمع کل -->
+                    <div class="total-box" style="background: transparent; padding: 0; text-align: right;">
+                        <div class="label" style="font-size: 13px; color: var(--text-muted);">💰 جمع کل قابل پرداخت</div>
+                        <div class="value" id="totalDisplay" style="font-size: 24px; color: var(--success);">0 تومان</div>
+                        <input type="hidden" name="total" id="totalInput" value="0">
+                    </div>
                 </div>
             </div>
             
-            <!-- کارت 4: جمع کل -->
-            <div class="form-card card-secondary">
+            <!-- کارت 4: انتخاب دریافت‌کنندگان (عمودی 2 ستونی) -->
+            <div class="form-card card-accent">
                 <div class="card-header">
-                    <i class="fas fa-calculator"></i>
-                    <h3>جمع کل فاکتور</h3>
+                    <i class="fas fa-users"></i>
+                    <h3>انتخاب دریافت‌کنندگان <span class="required" id="forwardRequired">*</span></h3>
                 </div>
                 <div class="card-body">
-                    <div class="total-box">
-                        <div class="label">💰 جمع کل قابل پرداخت</div>
-                        <div class="value" id="totalDisplay">0 تومان</div>
-                        <input type="hidden" name="total" id="totalInput" value="0">
-                        <small class="help-text" style="margin-top: 8px;">(مبلغ پایه - تخفیف + ارزش افزوده)</small>
+                    <div class="forward-section" style="background: #f0f9ff; padding: 16px; border-radius: 16px;">
+                        <p style="margin-bottom: 16px; font-size: 12px; color: #0369a1;">
+                            <i class="fas fa-info-circle"></i> 
+                            کاربران انتخاب شده می‌توانند این فاکتور را تأیید یا رد کنند. 
+                            پس از تأیید همه کاربران، شما می‌توانید فاکتور را نهایی کنید.
+                        </p>
+                        
+                        <!-- لیست کاربران با گرید عمودی 2 ستونی -->
+                        <div class="users-grid-list-vertical">
+                            <?php if (empty($users)): ?>
+                                <div style="padding: 20px; text-align: center; color: #64748b; grid-column: span 2;">
+                                    <i class="fas fa-user-slash"></i> کاربر دیگری یافت نشد
+                                </div>
+                            <?php else: ?>
+                                <?php foreach ($users as $user): ?>
+                                    <label class="user-checkbox-item-vertical">
+                                        <input type="checkbox" name="selected_users[]" value="<?php echo $user['id']; ?>" 
+                                               class="user-checkbox"
+                                               <?php echo (isset($_POST['selected_users']) && in_array($user['id'], $_POST['selected_users'])) ? 'checked' : ''; ?>>
+                                        <div class="user-info">
+                                            <div class="user-name"><?php echo htmlspecialchars($user['full_name']); ?></div>
+                                            <div class="user-username">@<?php echo htmlspecialchars($user['username']); ?></div>
+                                        </div>
+                                    </label>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </div>
+                        
+                        <div class="selected-count-badge" id="selectedCountBadge">
+                            <i class="fas fa-check-circle"></i> <span id="selectedCount">0</span> کاربر انتخاب شده است
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
         
-        <!-- ردیف سوم: فایل فاکتور + ارجاع سند + توضیحات (3 ستون کنار هم) -->
-        <div class="three-columns">
+        <!-- ردیف سوم: فایل فاکتور -->
+        <div class="two-columns">
             
             <!-- کارت 5: فایل فاکتور -->
-            <div class="form-card card-accent">
+            <div class="form-card card-accent" style="width: 100%;">
                 <div class="card-header">
                     <i class="fas fa-paperclip"></i>
                     <h3>فایل فاکتور</h3>
@@ -694,67 +906,8 @@ ob_start();
                 </div>
             </div>
             
-            <!-- کارت 6: ارجاع سند -->
-            <div class="form-card card-accent">
-                <div class="card-header">
-                    <i class="fas fa-share-alt"></i>
-                    <h3>ارجاع سند <span class="required" id="forwardRequired">*</span></h3>
-                </div>
-                <div class="card-body">
-                    <div class="forward-section">
-                        <div class="radio-group">
-                            <label>
-                                <input type="radio" name="forward_type" value="department" id="forwardDeptRadio" <?php echo (!empty($_POST['forward_to_department']) && empty($_POST['forward_to_user'])) ? 'checked' : ''; ?>>
-                                <i class="fas fa-building"></i> ارجاع به بخش
-                            </label>
-                            <label>
-                                <input type="radio" name="forward_type" value="user" id="forwardUserRadio" <?php echo (!empty($_POST['forward_to_user']) && empty($_POST['forward_to_department'])) ? 'checked' : ''; ?>>
-                                <i class="fas fa-user"></i> ارجاع به شخص
-                            </label>
-                        </div>
-                        
-                        <div id="departmentSelect" style="display: <?php echo (!empty($_POST['forward_to_department']) && empty($_POST['forward_to_user'])) ? 'block' : 'none'; ?>;">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <select name="forward_to_department" id="forwardDepartment" style="width: 100%;">
-                                    <option value="">--- انتخاب بخش ---</option>
-                                    <?php foreach ($departments as $dept): ?>
-                                        <option value="<?php echo $dept['id']; ?>" <?php echo ($_POST['forward_to_department'] ?? '') == $dept['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($dept['name']); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <small class="help-text">فاکتور برای همه کاربران این بخش قابل مشاهده است</small>
-                            </div>
-                        </div>
-                        
-                        <div id="userSelect" style="display: <?php echo (!empty($_POST['forward_to_user']) && empty($_POST['forward_to_department'])) ? 'block' : 'none'; ?>;">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <select name="forward_to_user" id="forwardUser" style="width: 100%;">
-                                    <option value="">--- انتخاب شخص ---</option>
-                                    <?php foreach ($users as $user): ?>
-                                        <option value="<?php echo $user['id']; ?>" <?php echo ($_POST['forward_to_user'] ?? '') == $user['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($user['full_name']); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <small class="help-text">فاکتور فقط برای این شخص قابل مشاهده است</small>
-                            </div>
-                        </div>
-                        
-                        <input type="hidden" name="forward_to_department" id="hiddenDept" value="<?php echo htmlspecialchars($_POST['forward_to_department'] ?? ''); ?>">
-                        <input type="hidden" name="forward_to_user" id="hiddenUser" value="<?php echo htmlspecialchars($_POST['forward_to_user'] ?? ''); ?>">
-                    </div>
-                </div>
-            </div>
-            
-            <!-- کارت 7: توضیحات -->
-            <div class="form-card card-accent">
-                <div class="card-header">
-                    <i class="fas fa-align-right"></i>
-                    <h3>توضیحات اضافی</h3>
-                </div>
-                <div class="card-body">
-                    <div class="form-group">
-                        <textarea name="description" rows="5" placeholder="توضیحات اضافی (اختیاری)..."><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
-                    </div>
-                </div>
-            </div>
+            <!-- فضای خالی برای تعادل -->
+            <div style="visibility: hidden;"></div>
         </div>
         
         <div class="form-actions">
@@ -762,7 +915,7 @@ ob_start();
                 <i class="fas fa-save"></i> ذخیره پیش‌نویس
             </button>
             <button type="submit" name="create_invoice" value="1" class="btn btn-primary" id="submitBtn">
-                <i class="fas fa-paper-plane"></i> ثبت و ارسال فاکتور
+                <i class="fas fa-paper-plane"></i> ثبت و ارسال برای کاربران
             </button>
             <a href="inbox.php" class="btn btn-outline">انصراف</a>
         </div>
@@ -791,44 +944,29 @@ function calculateTotal() {
     document.getElementById('totalInput').value = total;
 }
 
-// ارجاع انحصاری
-const forwardDeptRadio = document.getElementById('forwardDeptRadio');
-const forwardUserRadio = document.getElementById('forwardUserRadio');
-const departmentSelectDiv = document.getElementById('departmentSelect');
-const userSelectDiv = document.getElementById('userSelect');
-const forwardDepartment = document.getElementById('forwardDepartment');
-const forwardUser = document.getElementById('forwardUser');
-const hiddenDept = document.getElementById('hiddenDept');
-const hiddenUser = document.getElementById('hiddenUser');
+// ========== شمارش کاربران انتخاب شده ==========
+const checkboxes = document.querySelectorAll('.user-checkbox');
+const selectedCountSpan = document.getElementById('selectedCount');
+const selectedCountBadge = document.getElementById('selectedCountBadge');
 
-function updateForwardFields() {
-    if (forwardDeptRadio && forwardDeptRadio.checked) {
-        departmentSelectDiv.style.display = 'block';
-        userSelectDiv.style.display = 'none';
-        forwardDepartment.disabled = false;
-        forwardUser.disabled = true;
-        forwardUser.value = '';
-        hiddenUser.value = '';
-        hiddenDept.value = forwardDepartment.value;
-    } else if (forwardUserRadio && forwardUserRadio.checked) {
-        departmentSelectDiv.style.display = 'none';
-        userSelectDiv.style.display = 'block';
-        forwardDepartment.disabled = true;
-        forwardUser.disabled = false;
-        forwardDepartment.value = '';
-        hiddenDept.value = '';
-        hiddenUser.value = forwardUser.value;
+function updateSelectedCount() {
+    const checkedCount = document.querySelectorAll('.user-checkbox:checked').length;
+    selectedCountSpan.textContent = checkedCount;
+    
+    if (checkedCount === 0) {
+        selectedCountBadge.style.background = '#fee2e2';
+        selectedCountBadge.style.color = '#dc2626';
     } else {
-        departmentSelectDiv.style.display = 'none';
-        userSelectDiv.style.display = 'none';
+        selectedCountBadge.style.background = '#eef2ff';
+        selectedCountBadge.style.color = '#4f46e5';
     }
 }
 
-if (forwardDeptRadio) forwardDeptRadio.addEventListener('change', updateForwardFields);
-if (forwardUserRadio) forwardUserRadio.addEventListener('change', updateForwardFields);
-if (forwardDepartment) forwardDepartment.addEventListener('change', () => { hiddenDept.value = forwardDepartment.value; });
-if (forwardUser) forwardUser.addEventListener('change', () => { hiddenUser.value = forwardUser.value; });
-updateForwardFields();
+checkboxes.forEach(cb => {
+    cb.addEventListener('change', updateSelectedCount);
+});
+updateSelectedCount();
+// =============================================
 
 // پیش‌نمایش فایل
 document.getElementById('fileInput').addEventListener('change', function(e) {
@@ -847,32 +985,15 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
     } else { preview.style.display = 'none'; }
 });
 
-// اعتبارسنجی ارجاع و فایل برای ثبت نهایی
+// اعتبارسنجی برای ثبت نهایی
 document.getElementById('submitBtn').addEventListener('click', function(e) {
-    const forwardType = document.querySelector('input[name="forward_type"]:checked');
-    if (!forwardType) {
+    const checkedCount = document.querySelectorAll('.user-checkbox:checked').length;
+    if (checkedCount === 0) {
         e.preventDefault();
-        alert('لطفاً روش ارجاع را انتخاب کنید (بخش یا شخص)');
+        alert('لطفاً حداقل یک کاربر را به عنوان دریافت‌کننده انتخاب کنید');
         return false;
     }
     
-    if (forwardType.value === 'department') {
-        const dept = document.getElementById('forwardDepartment').value;
-        if (!dept) {
-            e.preventDefault();
-            alert('لطفاً بخش مقصد را انتخاب کنید');
-            return false;
-        }
-    } else if (forwardType.value === 'user') {
-        const user = document.getElementById('forwardUser').value;
-        if (!user) {
-            e.preventDefault();
-            alert('لطفاً شخص مقصد را انتخاب کنید');
-            return false;
-        }
-    }
-    
-    // بررسی آپلود فایل
     const fileInput = document.getElementById('fileInput');
     if (!fileInput.files || !fileInput.files[0]) {
         e.preventDefault();
@@ -886,6 +1007,11 @@ document.getElementById('draftBtn').addEventListener('click', function() {
     document.getElementById('fileInput').removeAttribute('required');
     document.getElementById('fileRequired').style.display = 'none';
     document.getElementById('forwardRequired').style.display = 'none';
+    
+    // برای پیش‌نویس، نیازی به انتخاب کاربر نیست
+    checkboxes.forEach(cb => {
+        cb.required = false;
+    });
 });
 
 // محاسبه اولیه
