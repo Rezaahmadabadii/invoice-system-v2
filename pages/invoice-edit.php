@@ -26,7 +26,7 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// دریافت اطلاعات فاکتور با JOIN
+// دریافت اطلاعات فاکتور
 $stmt = $pdo->prepare("
     SELECT d.*, c.short_name as company_short_name
     FROM documents d
@@ -51,15 +51,28 @@ if ($invoice['created_by'] != $_SESSION['user_id']) {
 // ========== دریافت وضعیت فعلی فاکتور ==========
 $current_status = $invoice['status'];
 $is_draft = ($current_status == 'draft');
+
+// اگر فاکتور پیش‌نویس نیست، اجازه ویرایش ندارد (فقط مشاهده)
+if (!$is_draft) {
+    $_SESSION['error'] = 'فقط فاکتورهای پیش‌نویس قابل ویرایش هستند.';
+    header('Location: invoice-view.php?id=' . $id);
+    exit;
+}
 // =============================================
 
 // دریافت لیست‌های مورد نیاز
 $companies = $pdo->query("SELECT id, name, short_name FROM companies ORDER BY name")->fetchAll();
 $vendors = $pdo->query("SELECT id, name, contract_number, national_id FROM vendors ORDER BY name")->fetchAll();
 $workshops = $pdo->query("SELECT id, name FROM workshops ORDER BY name")->fetchAll();
-$departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
+
+// دریافت لیست کاربران (به جز خود کاربر) برای ارجاع
 $user_id = $_SESSION['user_id'];
-$users_stmt = $pdo->prepare("SELECT id, full_name, username FROM users WHERE id != ? ORDER BY full_name");
+$users_stmt = $pdo->prepare("
+    SELECT id, full_name, username, department_id 
+    FROM users 
+    WHERE id != ?
+    ORDER BY full_name
+");
 $users_stmt->execute([$user_id]);
 $users = $users_stmt->fetchAll();
 
@@ -67,17 +80,16 @@ $error = '';
 $success = '';
 $duplicate_warning = '';
 
-// استخراج شماره فاکتور ساده از document_number (حذف مخفف شرکت)
+// استخراج شماره فاکتور ساده از document_number
 $simple_invoice_number = preg_replace('/^[^-]+-/', '', $invoice['document_number']);
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     // تشخیص نوع ذخیره
     $is_complete = isset($_POST['complete_invoice']); // دکمه تکمیل از صفحه view
     $is_save_draft = isset($_POST['save_draft']); // ذخیره به عنوان پیش‌نویس
-    $is_edit = isset($_POST['edit_invoice']); // ذخیره تغییرات عادی
     
     // اگر هیچ دکمه‌ای زده نشده، ادامه نده
-    if (!$is_complete && !$is_save_draft && !$is_edit) {
+    if (!$is_complete && !$is_save_draft) {
         // هیچ اقدامی نکن
     } else {
         $invoice_number = trim($_POST['invoice_number'] ?? '');
@@ -93,8 +105,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $description = trim($_POST['description'] ?? '');
         $force_save = isset($_POST['force_save']) ? 1 : 0;
         
-        $forward_to_department = $_POST['forward_to_department'] ?? '';
-        $forward_to_user = $_POST['forward_to_user'] ?? '';
+        // دریافت کاربران انتخاب شده برای ارجاع
+        $selected_users = $_POST['selected_users'] ?? [];
         
         $errors = [];
         
@@ -102,12 +114,28 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         if (empty($invoice_number)) $errors[] = 'شماره فاکتور الزامی است';
         if (empty($invoice_date)) $errors[] = 'تاریخ فاکتور الزامی است';
         if (empty($company_id)) $errors[] = 'انتخاب شرکت الزامی است';
-        if (empty($vendor_id)) $errors[] = 'انتخاب فروشنده الزامی است';
-        if (empty($amount) || $amount <= 0) $errors[] = 'مبلغ باید بزرگتر از صفر باشد';
         
-        // برای تکمیل پیش‌نویس، ارجاع الزامی است
-        if ($is_complete && empty($forward_to_department) && empty($forward_to_user)) {
-            $errors[] = 'لطفاً حداقل یکی از فیلدهای ارجاع را انتخاب کنید';
+        // برای تکمیل پیش‌نویس، اعتبارسنجی کامل
+        if ($is_complete) {
+            if (empty($vendor_id)) $errors[] = 'انتخاب فروشنده الزامی است';
+            if (empty($amount) || $amount <= 0) $errors[] = 'مبلغ باید بزرگتر از صفر باشد';
+            if (empty($selected_users)) $errors[] = 'لطفاً حداقل یک کاربر را به عنوان دریافت‌کننده انتخاب کنید';
+            
+            // بررسی آپلود فایل
+            if (!isset($_FILES['invoice_file']) || $_FILES['invoice_file']['error'] != UPLOAD_ERR_OK) {
+                if (empty($invoice['file_path'])) {
+                    $errors[] = 'آپلود فایل فاکتور الزامی است';
+                }
+            } elseif (isset($_FILES['invoice_file']) && $_FILES['invoice_file']['error'] == UPLOAD_ERR_OK) {
+                $allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+                $max_size = 5 * 1024 * 1024;
+                if (!in_array($_FILES['invoice_file']['type'], $allowed_types)) {
+                    $errors[] = 'نوع فایل باید JPEG، PNG یا PDF باشد';
+                }
+                if ($_FILES['invoice_file']['size'] > $max_size) {
+                    $errors[] = 'حجم فایل نباید بیشتر از ۵ مگابایت باشد';
+                }
+            }
         }
         
         // دریافت مخفف شرکت
@@ -122,35 +150,24 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $file_name = $invoice['file_name'];
         
         if (isset($_FILES['invoice_file']) && $_FILES['invoice_file']['error'] == UPLOAD_ERR_OK) {
-            $allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
-            $max_size = 5 * 1024 * 1024;
-            if (!in_array($_FILES['invoice_file']['type'], $allowed_types)) {
-                $errors[] = 'نوع فایل باید JPEG، PNG یا PDF باشد';
-            }
-            if ($_FILES['invoice_file']['size'] > $max_size) {
-                $errors[] = 'حجم فایل نباید بیشتر از ۵ مگابایت باشد';
+            $upload_dir = __DIR__ . '/../uploads/invoices/';
+            if (!file_exists($upload_dir)) mkdir($upload_dir, 0777, true);
+            $file_ext = pathinfo($_FILES['invoice_file']['name'], PATHINFO_EXTENSION);
+            $new_file_name = $final_invoice_number . '.' . $file_ext;
+            $file_path = 'uploads/invoices/' . $new_file_name;
+            $file_name = $_FILES['invoice_file']['name'];
+            
+            if ($invoice['file_path'] && file_exists(__DIR__ . '/../' . $invoice['file_path'])) {
+                unlink(__DIR__ . '/../' . $invoice['file_path']);
             }
             
-            if (empty($errors)) {
-                $upload_dir = __DIR__ . '/../uploads/invoices/';
-                if (!file_exists($upload_dir)) mkdir($upload_dir, 0777, true);
-                $file_ext = pathinfo($_FILES['invoice_file']['name'], PATHINFO_EXTENSION);
-                $new_file_name = $final_invoice_number . '.' . $file_ext;
-                $file_path = 'uploads/invoices/' . $new_file_name;
-                $file_name = $_FILES['invoice_file']['name'];
-                
-                if ($invoice['file_path'] && file_exists(__DIR__ . '/../' . $invoice['file_path'])) {
-                    unlink(__DIR__ . '/../' . $invoice['file_path']);
-                }
-                
-                if (!move_uploaded_file($_FILES['invoice_file']['tmp_name'], $upload_dir . $new_file_name)) {
-                    $errors[] = 'خطا در آپلود فایل';
-                }
+            if (!move_uploaded_file($_FILES['invoice_file']['tmp_name'], $upload_dir . $new_file_name)) {
+                $errors[] = 'خطا در آپلود فایل';
             }
         }
         
-        // بررسی تکراری بودن
-        if (!$is_save_draft && empty($errors)) {
+        // بررسی تکراری بودن (فقط برای تکمیل)
+        if ($is_complete && empty($errors)) {
             $check = $pdo->prepare("SELECT id FROM documents WHERE document_number = ? AND type = 'invoice' AND id != ?");
             $check->execute([$final_invoice_number, $id]);
             $existing = $check->fetch();
@@ -168,12 +185,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             }
             
             // ========== تعیین وضعیت بر اساس دکمه ==========
-            if ($is_complete && $current_status == 'draft') {
-                $new_status = 'pending';
-            } elseif ($is_save_draft) {
-                $new_status = 'draft';
+            if ($is_complete) {
+                $new_status = 'pending_approval';
+                $total_approvers = count($selected_users);
             } else {
-                $new_status = $current_status;
+                $new_status = 'draft';
+                $total_approvers = 0;
             }
             // =============================================
             
@@ -192,9 +209,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                     vat_amount = ?,
                     file_path = ?,
                     file_name = ?,
-                    current_holder_department_id = ?,
-                    current_holder_user_id = ?,
                     status = ?,
+                    total_approvers = ?,
+                    approved_count = 0,
+                    rejected_count = 0,
                     updated_at = NOW()
                 WHERE id = ?
             ";
@@ -214,48 +232,39 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 $vat ? ($amount_clean * 0.1) : 0,
                 $file_path,
                 $file_name,
-                $forward_to_department ?: null,
-                $forward_to_user ?: null,
                 $new_status,
+                $total_approvers,
                 $id
             ]);
             
             if ($result) {
-                // اگر از پیش‌نویس به pending تبدیل شد، ارجاع ثبت شود
-                if ($is_complete && $current_status == 'draft') {
-                    $forward_stmt = $pdo->prepare("
-                        INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) 
-                        VALUES (?, ?, ?, ?, 'forward', ?)
+                // اگر فاکتور تکمیل شد، برای کاربران انتخاب شده رکورد ثبت کن
+                if ($is_complete && !empty($selected_users)) {
+                    // حذف رکوردهای قبلی (اگر وجود داشته باشد)
+                    $pdo->prepare("DELETE FROM document_approvals WHERE document_id = ?")->execute([$id]);
+                    
+                    $insert_approval = $pdo->prepare("
+                        INSERT INTO document_approvals (document_id, user_id, status) 
+                        VALUES (?, ?, 'pending')
                     ");
-                    $forward_stmt->execute([
-                        $id, 
-                        $_SESSION['user_id'], 
-                        $forward_to_department ?: null, 
-                        $forward_to_user ?: null,
-                        'تکمیل پیش‌نویس و ارسال'
-                    ]);
-                } elseif (($forward_to_department != $invoice['current_holder_department_id'] || $forward_to_user != $invoice['current_holder_user_id']) && !$is_save_draft) {
-                    $forward_stmt = $pdo->prepare("
-                        INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) 
-                        VALUES (?, ?, ?, ?, 'forward', ?)
+                    
+                    $insert_history = $pdo->prepare("
+                        INSERT INTO forwarding_history (document_id, from_user_id, to_user_id, action, notes) 
+                        VALUES (?, ?, ?, 'forward', ?)
                     ");
-                    $forward_stmt->execute([
-                        $id, 
-                        $_SESSION['user_id'], 
-                        $forward_to_department ?: null, 
-                        $forward_to_user ?: null,
-                        'ویرایش و تغییر ارجاع'
-                    ]);
+                    
+                    foreach ($selected_users as $uid) {
+                        $insert_approval->execute([$id, $uid]);
+                        $insert_history->execute([$id, $_SESSION['user_id'], $uid, "ارسال فاکتور برای تأیید"]);
+                    }
                 }
                 
                 logActivity($_SESSION['user_id'], 'edit_invoice', "فاکتور ویرایش شد: $invoice_number", $id);
                 
                 if ($is_complete) {
-                    $_SESSION['message'] = '✅ فاکتور با موفقیت تکمیل و ارسال شد.';
-                } elseif ($is_save_draft) {
-                    $_SESSION['message'] = '📝 پیش‌نویس با موفقیت ذخیره شد.';
+                    $_SESSION['message'] = '✅ فاکتور با موفقیت تکمیل و برای ' . count($selected_users) . ' نفر ارسال شد.';
                 } else {
-                    $_SESSION['message'] = '✏️ فاکتور با موفقیت ویرایش شد. شماره فاکتور: ' . $final_invoice_number;
+                    $_SESSION['message'] = '📝 پیش‌نویس با موفقیت ذخیره شد.';
                 }
                 $_SESSION['message_type'] = 'success';
                 header('Location: inbox.php');
@@ -268,8 +277,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         if (!empty($errors)) {
             $error = implode('<br>', $errors);
         }
-    } // پایان else (هیچ دکمه‌ای زده نشده)
-} // پایان if ($_SERVER['REQUEST_METHOD'] == 'POST')
+    }
+}
 
 $page_title = 'ویرایش فاکتور';
 ob_start();
@@ -450,35 +459,90 @@ ob_start();
         color: var(--primary);
     }
     
-    .forward-section {
-        background: var(--accent-light);
+    /* ========== استایل لیست کاربران ========== */
+    .users-select-list {
+        max-height: 350px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
         border-radius: 16px;
-        padding: 16px;
+        background: white;
     }
     
-    .radio-group {
-        display: flex;
-        gap: 24px;
-        margin-bottom: 16px;
-        padding-bottom: 12px;
-        border-bottom: 1px dashed #fde68a;
+    .users-grid-list-vertical {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+        max-height: 400px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: white;
+        padding: 12px;
     }
     
-    .radio-group label {
+    .user-checkbox-item-vertical {
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-size: 12px;
-        font-weight: 500;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 12px;
         cursor: pointer;
+        transition: all 0.2s ease;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
     }
     
-    .radio-group input[type="radio"] {
-        width: 16px;
-        height: 16px;
-        margin: 0;
-        accent-color: var(--accent);
+    .user-checkbox-item-vertical:hover {
+        background: #eef2ff;
+        border-color: var(--primary);
+        transform: translateX(2px);
     }
+    
+    .user-checkbox-item-vertical input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+        margin: 0;
+        accent-color: var(--primary);
+        flex-shrink: 0;
+    }
+    
+    .user-checkbox-item-vertical .user-info {
+        flex: 1;
+        min-width: 0;
+    }
+    
+    .user-checkbox-item-vertical .user-name {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--text-main);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .user-checkbox-item-vertical .user-username {
+        font-size: 10px;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .selected-count-badge {
+        background: var(--primary-light);
+        color: var(--primary);
+        padding: 10px 16px;
+        border-radius: 30px;
+        font-size: 13px;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 16px;
+        transition: all 0.2s;
+    }
+    /* ===================================== */
     
     .form-actions {
         display: flex;
@@ -580,6 +644,9 @@ ob_start();
         .three-columns {
             grid-template-columns: repeat(2, 1fr);
         }
+        .users-grid-list-vertical {
+            grid-template-columns: 1fr;
+        }
     }
     @media (max-width: 900px) {
         .two-columns {
@@ -604,7 +671,7 @@ ob_start();
 
 <div class="form-wrapper">
     <div class="page-header">
-        <h1 class="page-title"><i class="fas fa-edit" style="color: var(--primary);"></i> ویرایش فاکتور</h1>
+        <h1 class="page-title"><i class="fas fa-edit" style="color: var(--primary);"></i> ویرایش پیش‌نویس فاکتور</h1>
         <a href="invoice-view.php?id=<?php echo $id; ?>" class="back-link"><i class="fas fa-arrow-right"></i> بازگشت</a>
     </div>
     
@@ -620,7 +687,7 @@ ob_start();
                     <input type="hidden" name="<?php echo htmlspecialchars($key); ?>" value="<?php echo htmlspecialchars($value); ?>">
                 <?php endforeach; ?>
                 <input type="hidden" name="force_save" value="1">
-                <button type="submit" name="edit_invoice" style="background: var(--accent); color: white; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer;">بله، ثبت شود</button>
+                <button type="submit" name="complete_invoice" style="background: var(--accent); color: white; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer;">بله، ثبت شود</button>
                 <a href="invoice-edit.php?id=<?php echo $id; ?>" style="background: #95a5a6; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none; margin-left: 10px;">خیر، انصراف</a>
             </form>
         </div>
@@ -650,6 +717,10 @@ ob_start();
                         <input type="text" name="contract_number" value="<?php echo htmlspecialchars($_POST['contract_number'] ?? $invoice['contract_number']); ?>" placeholder="اختیاری">
                         <small class="help-text">در صورت وجود قرارداد، شماره آن را وارد کنید</small>
                     </div>
+                    <div class="form-group">
+                        <label>توضیحات فاکتور</label>
+                        <textarea name="description" rows="3" placeholder="توضیحات اضافی (اختیاری)..."><?php echo htmlspecialchars($_POST['description'] ?? $invoice['description']); ?></textarea>
+                    </div>
                 </div>
             </div>
             
@@ -674,7 +745,7 @@ ob_start();
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>فروشنده/فروشگاه <span class="required">*</span></label>
+                        <label>فروشنده/فروشگاه <span class="required" id="vendorRequired">*</span></label>
                         <select name="vendor_id" id="vendorSelect" required>
                             <option value="">انتخاب کنید</option>
                             <?php foreach ($vendors as $vendor): ?>
@@ -705,7 +776,7 @@ ob_start();
                 </div>
                 <div class="card-body">
                     <div class="form-group">
-                        <label>مبلغ پایه (تومان) <span class="required">*</span></label>
+                        <label>مبلغ پایه (تومان) <span class="required" id="amountRequired">*</span></label>
                         <input type="text" name="amount" id="amountInput" onkeyup="formatNumber(this); calculateTotal();" value="<?php echo htmlspecialchars($_POST['amount'] ?? number_format($invoice['amount'] ?? 0)); ?>" placeholder="۰">
                     </div>
                     <div class="form-group">
@@ -737,8 +808,8 @@ ob_start();
             </div>
         </div>
         
-        <!-- ردیف سوم: فایل فاکتور + ارجاع سند + توضیحات (3 ستون کنار هم) -->
-        <div class="three-columns">
+        <!-- ردیف سوم: فایل فاکتور + ارجاع به چند نفر + توضیحات -->
+        <div class="two-columns">
             
             <div class="form-card card-accent">
                 <div class="card-header">
@@ -747,41 +818,28 @@ ob_start();
                 </div>
                 <div class="card-body">
                     <?php if (!empty($invoice['file_path']) && file_exists(__DIR__ . '/../' . $invoice['file_path'])): 
-                        $full_path = __DIR__ . '/../' . $invoice['file_path'];
+                        $web_path = str_replace('\\', '/', $invoice['file_path']);
+                        $file_url = '/invoice-system-v2/' . $web_path;
                         $file_ext = strtolower(pathinfo($invoice['file_path'], PATHINFO_EXTENSION));
                         $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
-                        
-                        // برای تصاویر، محتوا را به base64 تبدیل کن
-                        if ($is_image) {
-                            $image_data = file_get_contents($full_path);
-                            $base64 = base64_encode($image_data);
-                            $image_src = 'data:image/' . $file_ext . ';base64,' . $base64;
-                        } else {
-                            $web_path = str_replace('\\', '/', $invoice['file_path']);
-                            $web_path = str_replace('invoice-system-v2/', '', $web_path);
-                            $image_src = '/invoice-system-v2/' . $web_path;
-                        }
                     ?>
                         <div class="current-file">
                             <strong>📎 فایل ضمیمه فعلی:</strong>
                             <?php if ($is_image): ?>
                                 <div style="margin-top: 8px;">
-                                    <img src="<?php echo $image_src; ?>" alt="پیش‌نمایش" style="max-width: 150px; max-height: 150px; border-radius: 8px; border: 1px solid #ddd;">
-                                    <br>
-                                    <small style="font-size: 10px;">مسیر: <?php echo htmlspecialchars($invoice['file_path']); ?></small>
+                                    <img src="<?php echo $file_url; ?>" alt="پیش‌نمایش" style="max-width: 100px; border-radius: 8px;">
                                 </div>
                             <?php else: ?>
                                 <div style="margin-top: 8px;">
-                                    <a href="<?php echo $image_src; ?>" target="_blank" style="color: #3498db;">
-                                        📄 <?php echo htmlspecialchars($invoice['file_name'] ?? basename($invoice['file_path'])); ?>
-                                    </a>
+                                    <a href="<?php echo $file_url; ?>" target="_blank">📄 <?php echo htmlspecialchars($invoice['file_name'] ?? basename($invoice['file_path'])); ?></a>
                                 </div>
                             <?php endif; ?>
                             <small class="help-text">در صورت آپلود فایل جدید، فایل قبلی جایگزین می‌شود</small>
                         </div>
-                    <?php endif; ?>                 
+                    <?php endif; ?>
+                    
                     <div class="form-group">
-                        <label>آپلود فایل جدید (اختیاری)</label>
+                        <label>آپلود فایل جدید <span class="required" id="fileRequired">*</span></label>
                         <input type="file" name="invoice_file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf">
                         <small class="help-text">فرمت‌های مجاز: jpg, jpeg, png, pdf | حداکثر حجم: ۵ مگابایت</small>
                         <div id="filePreview" class="file-preview" style="display: none;"></div>
@@ -791,78 +849,53 @@ ob_start();
             
             <div class="form-card card-accent">
                 <div class="card-header">
-                    <i class="fas fa-share-alt"></i>
-                    <h3>ارجاع سند <span class="required">*</span></h3>
+                    <i class="fas fa-users"></i>
+                    <h3>انتخاب دریافت‌کنندگان <span class="required" id="forwardRequired">*</span></h3>
                 </div>
                 <div class="card-body">
-                    <div class="forward-section">
-                        <div class="radio-group">
-                            <label>
-                                <input type="radio" name="forward_type" value="department" id="forwardDeptRadio" <?php echo (!empty($invoice['current_holder_department_id']) && empty($invoice['current_holder_user_id'])) ? 'checked' : ''; ?>>
-                                <i class="fas fa-building"></i> ارجاع به بخش
-                            </label>
-                            <label>
-                                <input type="radio" name="forward_type" value="user" id="forwardUserRadio" <?php echo (!empty($invoice['current_holder_user_id']) && empty($invoice['current_holder_department_id'])) ? 'checked' : ''; ?>>
-                                <i class="fas fa-user"></i> ارجاع به شخص
-                            </label>
+                    <div class="forward-section" style="background: #f0f9ff; padding: 16px; border-radius: 16px;">
+                        <p style="margin-bottom: 16px; font-size: 12px; color: #0369a1;">
+                            <i class="fas fa-info-circle"></i> 
+                            کاربران انتخاب شده می‌توانند این فاکتور را تأیید یا رد کنند. 
+                            پس از تأیید همه کاربران، شما می‌توانید فاکتور را نهایی کنید.
+                        </p>
+                        
+                        <div class="users-grid-list-vertical">
+                            <?php if (empty($users)): ?>
+                                <div style="padding: 20px; text-align: center; color: #64748b; grid-column: span 2;">
+                                    <i class="fas fa-user-slash"></i> کاربر دیگری یافت نشد
+                                </div>
+                            <?php else: ?>
+                                <?php foreach ($users as $user): ?>
+                                    <label class="user-checkbox-item-vertical">
+                                        <input type="checkbox" name="selected_users[]" value="<?php echo $user['id']; ?>" 
+                                               class="user-checkbox">
+                                        <div class="user-info">
+                                            <div class="user-name"><?php echo htmlspecialchars($user['full_name']); ?></div>
+                                            <div class="user-username">@<?php echo htmlspecialchars($user['username']); ?></div>
+                                        </div>
+                                    </label>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
                         </div>
                         
-                        <div id="departmentSelect" style="display: <?php echo (!empty($invoice['current_holder_department_id']) && empty($invoice['current_holder_user_id'])) ? 'block' : 'none'; ?>;">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <select name="forward_to_department" id="forwardDepartment" style="width: 100%;">
-                                    <option value="">--- انتخاب بخش ---</option>
-                                    <?php foreach ($departments as $dept): ?>
-                                        <option value="<?php echo $dept['id']; ?>" <?php echo (($invoice['current_holder_department_id'] ?? '') == $dept['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($dept['name']); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <small class="help-text">فاکتور برای همه کاربران این بخش قابل مشاهده است</small>
-                            </div>
+                        <div class="selected-count-badge" id="selectedCountBadge">
+                            <i class="fas fa-check-circle"></i> <span id="selectedCount">0</span> کاربر انتخاب شده است
                         </div>
-                        
-                        <div id="userSelect" style="display: <?php echo (!empty($invoice['current_holder_user_id']) && empty($invoice['current_holder_department_id'])) ? 'block' : 'none'; ?>;">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <select name="forward_to_user" id="forwardUser" style="width: 100%;">
-                                    <option value="">--- انتخاب شخص ---</option>
-                                    <?php foreach ($users as $user): ?>
-                                        <option value="<?php echo $user['id']; ?>" <?php echo (($invoice['current_holder_user_id'] ?? '') == $user['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($user['full_name']); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <small class="help-text">فاکتور فقط برای این شخص قابل مشاهده است</small>
-                            </div>
-                        </div>
-                        
-                        <input type="hidden" name="forward_to_department" id="hiddenDept" value="<?php echo htmlspecialchars($invoice['current_holder_department_id'] ?? ''); ?>">
-                        <input type="hidden" name="forward_to_user" id="hiddenUser" value="<?php echo htmlspecialchars($invoice['current_holder_user_id'] ?? ''); ?>">
                     </div>
                 </div>
             </div>
             
-            <div class="form-card card-accent">
-                <div class="card-header">
-                    <i class="fas fa-align-right"></i>
-                    <h3>توضیحات اضافی</h3>
-                </div>
-                <div class="card-body">
-                    <div class="form-group">
-                        <textarea name="description" rows="5" placeholder="توضیحات اضافی (اختیاری)..."><?php echo htmlspecialchars($_POST['description'] ?? $invoice['description']); ?></textarea>
-                    </div>
-                </div>
-            </div>
+            <div class="form-card card-accent" style="visibility: hidden;"></div>
         </div>
         
         <div class="form-actions">
-            <?php if ($is_draft): ?>
-                <button type="submit" name="save_draft" value="1" class="btn btn-draft">
-                    <i class="fas fa-save"></i> ذخیره پیش‌نویس
-                </button>
-                <button type="submit" name="complete_invoice" value="1" class="btn btn-primary">
-                    <i class="fas fa-check-circle"></i> تکمیل و ارسال
-                </button>
-            <?php else: ?>
-                <button type="submit" name="edit_invoice" value="1" class="btn btn-primary">
-                    <i class="fas fa-save"></i> ذخیره تغییرات
-                </button>
-            <?php endif; ?>
+            <button type="submit" name="save_draft" value="1" class="btn btn-draft" id="draftBtn">
+                <i class="fas fa-save"></i> ذخیره پیش‌نویس
+            </button>
+            <button type="submit" name="complete_invoice" value="1" class="btn btn-primary" id="submitBtn">
+                <i class="fas fa-paper-plane"></i> تکمیل و ارسال برای کاربران
+            </button>
             <a href="invoice-view.php?id=<?php echo $id; ?>" class="btn btn-outline">انصراف</a>
         </div>
     </form>
@@ -888,44 +921,29 @@ function calculateTotal() {
     document.getElementById('totalInput').value = total;
 }
 
-// ارجاع انحصاری
-const forwardDeptRadio = document.getElementById('forwardDeptRadio');
-const forwardUserRadio = document.getElementById('forwardUserRadio');
-const departmentSelectDiv = document.getElementById('departmentSelect');
-const userSelectDiv = document.getElementById('userSelect');
-const forwardDepartment = document.getElementById('forwardDepartment');
-const forwardUser = document.getElementById('forwardUser');
-const hiddenDept = document.getElementById('hiddenDept');
-const hiddenUser = document.getElementById('hiddenUser');
+// ========== شمارش کاربران انتخاب شده ==========
+const checkboxes = document.querySelectorAll('.user-checkbox');
+const selectedCountSpan = document.getElementById('selectedCount');
+const selectedCountBadge = document.getElementById('selectedCountBadge');
 
-function updateForwardFields() {
-    if (forwardDeptRadio && forwardDeptRadio.checked) {
-        departmentSelectDiv.style.display = 'block';
-        userSelectDiv.style.display = 'none';
-        forwardDepartment.disabled = false;
-        forwardUser.disabled = true;
-        forwardUser.value = '';
-        hiddenUser.value = '';
-        hiddenDept.value = forwardDepartment.value;
-    } else if (forwardUserRadio && forwardUserRadio.checked) {
-        departmentSelectDiv.style.display = 'none';
-        userSelectDiv.style.display = 'block';
-        forwardDepartment.disabled = true;
-        forwardUser.disabled = false;
-        forwardDepartment.value = '';
-        hiddenDept.value = '';
-        hiddenUser.value = forwardUser.value;
+function updateSelectedCount() {
+    const checkedCount = document.querySelectorAll('.user-checkbox:checked').length;
+    selectedCountSpan.textContent = checkedCount;
+    
+    if (checkedCount === 0) {
+        selectedCountBadge.style.background = '#fee2e2';
+        selectedCountBadge.style.color = '#dc2626';
     } else {
-        departmentSelectDiv.style.display = 'none';
-        userSelectDiv.style.display = 'none';
+        selectedCountBadge.style.background = '#eef2ff';
+        selectedCountBadge.style.color = '#4f46e5';
     }
 }
 
-if (forwardDeptRadio) forwardDeptRadio.addEventListener('change', updateForwardFields);
-if (forwardUserRadio) forwardUserRadio.addEventListener('change', updateForwardFields);
-if (forwardDepartment) forwardDepartment.addEventListener('change', () => { hiddenDept.value = forwardDepartment.value; });
-if (forwardUser) forwardUser.addEventListener('change', () => { hiddenUser.value = forwardUser.value; });
-updateForwardFields();
+checkboxes.forEach(cb => {
+    cb.addEventListener('change', updateSelectedCount);
+});
+updateSelectedCount();
+// =============================================
 
 // پیش‌نمایش فایل جدید
 document.getElementById('fileInput').addEventListener('change', function(e) {
@@ -944,29 +962,47 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
     } else { preview.style.display = 'none'; }
 });
 
-// اعتبارسنجی ارجاع
-document.getElementById('invoiceForm').addEventListener('submit', function(e) {
-    const forwardType = document.querySelector('input[name="forward_type"]:checked');
-    if (!forwardType) {
+// حذف required برای فایل و ارجاع در حالت پیش‌نویس
+document.getElementById('draftBtn').addEventListener('click', function() {
+    document.getElementById('fileRequired').style.display = 'none';
+    document.getElementById('forwardRequired').style.display = 'none';
+    document.getElementById('vendorRequired').style.display = 'none';
+    document.getElementById('amountRequired').style.display = 'none';
+    
+    checkboxes.forEach(cb => {
+        cb.required = false;
+    });
+});
+
+// اعتبارسنجی برای تکمیل و ارسال
+document.getElementById('submitBtn').addEventListener('click', function(e) {
+    const checkedCount = document.querySelectorAll('.user-checkbox:checked').length;
+    if (checkedCount === 0) {
         e.preventDefault();
-        alert('لطفاً روش ارجاع را انتخاب کنید (بخش یا شخص)');
+        alert('لطفاً حداقل یک کاربر را به عنوان دریافت‌کننده انتخاب کنید');
         return false;
     }
     
-    if (forwardType.value === 'department') {
-        const dept = document.getElementById('forwardDepartment').value;
-        if (!dept) {
-            e.preventDefault();
-            alert('لطفاً بخش مقصد را انتخاب کنید');
-            return false;
-        }
-    } else if (forwardType.value === 'user') {
-        const user = document.getElementById('forwardUser').value;
-        if (!user) {
-            e.preventDefault();
-            alert('لطفاً شخص مقصد را انتخاب کنید');
-            return false;
-        }
+    const vendorSelect = document.getElementById('vendorSelect');
+    if (!vendorSelect.value) {
+        e.preventDefault();
+        alert('لطفاً فروشنده را انتخاب کنید');
+        return false;
+    }
+    
+    const amountInput = document.getElementById('amountInput');
+    if (!amountInput.value || parseFloat(amountInput.value.replace(/,/g, '')) <= 0) {
+        e.preventDefault();
+        alert('لطفاً مبلغ معتبر وارد کنید');
+        return false;
+    }
+    
+    const fileInput = document.getElementById('fileInput');
+    const currentFile = <?php echo !empty($invoice['file_path']) ? 'true' : 'false'; ?>;
+    if ((!fileInput.files || !fileInput.files[0]) && !currentFile) {
+        e.preventDefault();
+        alert('لطفاً فایل فاکتور را آپلود کنید');
+        return false;
     }
 });
 

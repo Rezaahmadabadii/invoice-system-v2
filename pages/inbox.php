@@ -58,11 +58,11 @@ if ($selected_year && $selected_month) {
     $params[] = $end_date_greg;
 }
 
-// تشخیص ادمین بودن کاربر
+// دریافت نقش‌های کاربر
 $user_roles = $_SESSION['user_roles'] ?? [];
 if (empty($user_roles) && isset($_SESSION['user_id'])) {
     $stmt = $pdo->prepare("SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = ?");
-    $stmt->execute([$_SESSION['user_id']]);
+    $stmt->execute([$user_id]);
     $user_roles = $stmt->fetchAll(PDO::FETCH_COLUMN);
     $_SESSION['user_roles'] = $user_roles;
 }
@@ -70,39 +70,29 @@ if (empty($user_roles) && isset($_SESSION['user_id'])) {
 $is_admin_user = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 $is_admin_flag = $is_admin_user ? 'admin' : 'no';
 
-// کوئری اصلی با دسترسی‌های کاربر
+// ========== کوئری اصلی با دسترسی‌های جدید ==========
 $sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
-               holder_dep.name as holder_department_name,
-               holder_user.full_name as holder_user_name
+               creator.full_name as creator_name,
+               (SELECT COUNT(*) FROM document_approvals WHERE document_id = d.id) as total_approvers,
+               (SELECT COUNT(*) FROM document_approvals WHERE document_id = d.id AND status = 'approved') as approved_count,
+               (SELECT COUNT(*) FROM document_approvals WHERE document_id = d.id AND status = 'rejected') as rejected_count
         FROM documents d 
         LEFT JOIN companies c ON d.company_id = c.id 
         LEFT JOIN vendors v ON d.vendor_id = v.id
-        LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
-        LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
+        LEFT JOIN users creator ON d.created_by = creator.id
         WHERE d.type = 'invoice'
         AND (
             ? = 'admin'
             OR d.created_by = ? 
-            OR d.current_holder_user_id = ? 
-            OR d.current_holder_department_id = ?
-            OR (
-                d.status = 'forwarded'
-                AND EXISTS (
-                    SELECT 1 FROM forwarding_history fh 
-                    WHERE fh.document_id = d.id 
-                    AND fh.from_user_id = ?
-                    AND fh.action = 'forward'
-                    AND fh.created_at = (
-                        SELECT MAX(created_at) FROM forwarding_history 
-                        WHERE document_id = d.id AND action = 'forward'
-                    )
-                )
+            OR EXISTS (
+                SELECT 1 FROM document_approvals da 
+                WHERE da.document_id = d.id AND da.user_id = ?
             )
         )
         $date_condition";
 
-// پارامترها: شرط ادمین + سه شرط اصلی + شرط آخرین ارسال‌کننده
-$params = array_merge([$is_admin_flag, $user_id, $user_id, $_SESSION['user_department_id'] ?? null, $user_id], $params);
+// پارامترها: شرط ادمین + ایجادکننده + کاربر در document_approvals
+$params = array_merge([$is_admin_flag, $user_id, $user_id], $params);
 
 if ($filter_company) {
     $sql .= " AND d.company_id = ?";
@@ -127,17 +117,18 @@ $invoices = $stmt->fetchAll();
 
 // آمار
 $total_invoices = count($invoices);
-$completed_invoices = count(array_filter($invoices, fn($i) => $i['status'] == 'approved'));
-$pending_invoices = count(array_filter($invoices, fn($i) => $i['status'] == 'pending'));
+$completed_invoices = count(array_filter($invoices, fn($i) => $i['status'] == 'final_approved'));
+$pending_invoices = count(array_filter($invoices, fn($i) => in_array($i['status'], ['pending_approval', 'partially_approved', 'ready_to_close'])));
 $draft_count = count(array_filter($invoices, fn($i) => $i['status'] == 'draft'));
+$rejected_count = count(array_filter($invoices, fn($i) => $i['status'] == 'rejected'));
 
 $status_texts = [
-    'pending' => '⏳ در انتظار',
-    'forwarded' => '🔄 ارسال شده',
-    'approved' => '✅ تایید شده',
-    'rejected' => '❌ رد شده',
     'draft' => '📝 پیش‌نویس',
-    'cancelled' => '🚫 لغو شده'
+    'pending_approval' => '⏳ در انتظار تأیید',
+    'partially_approved' => '🔄 تأیید نسبی',
+    'rejected' => '❌ رد شده',
+    'ready_to_close' => '✅ آماده تأیید نهایی',
+    'final_approved' => '🎉 تأیید نهایی'
 ];
 
 $page_title = 'مدیریت فاکتورها';
@@ -157,7 +148,6 @@ ob_start();
         --text-muted: #64748b;
     }
     
-    /* انیمیشن سبد خرید - حرکت به راست و محو (مشابه کامیون) */
     .cart-animation-area {
         display: flex;
         justify-content: center;
@@ -190,6 +180,7 @@ ob_start();
         background: linear-gradient(135deg, var(--primary), #2563eb);
     }
     .stat-card.draft-card { background: linear-gradient(135deg, var(--warning), #d97706); }
+    .stat-card.rejected-card { background: linear-gradient(135deg, var(--danger), #dc2626); }
     .stat-card div:first-child { font-size: 13px; opacity: 0.9; }
     .stat-card div:last-child { font-size: 28px; font-weight: bold; }
     
@@ -231,10 +222,9 @@ ob_start();
     }
     .filter-btn.reset { background: #95a5a6; }
     
-    /* ========== کارت‌ها - گرید فشرده ========== */
     .cards-list {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
         gap: 16px;
         max-height: 70vh;
         overflow-y: auto;
@@ -243,7 +233,7 @@ ob_start();
     
     .invoice-card {
         background: white;
-        border-radius: 14px;
+        border-radius: 16px;
         overflow: hidden;
         box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         transition: all 0.2s ease;
@@ -259,12 +249,12 @@ ob_start();
         height: 4px;
         width: 100%;
     }
-    
-    .status-bar-pending { background: #f39c12; }
-    .status-bar-forwarded { background: #3498db; }
-    .status-bar-approved { background: #2ecc71; }
-    .status-bar-rejected { background: #e74c3c; }
     .status-bar-draft { background: #95a5a6; }
+    .status-bar-pending_approval { background: #f59e0b; }
+    .status-bar-partially_approved { background: #3b82f6; }
+    .status-bar-ready_to_close { background: #10b981; }
+    .status-bar-final_approved { background: #10b981; }
+    .status-bar-rejected { background: #ef4444; }
     
     .card-content {
         padding: 14px;
@@ -278,9 +268,9 @@ ob_start();
     }
     
     .doc-number {
-        font-size: 12px;
+        font-size: 11px;
         font-weight: bold;
-        background: linear-gradient(135deg, #3498db10, #3498db20);
+        background: #f1f5f9;
         padding: 4px 10px;
         border-radius: 20px;
         direction: ltr;
@@ -292,7 +282,7 @@ ob_start();
         color: white;
         padding: 4px 10px;
         border-radius: 30px;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: bold;
     }
     
@@ -338,6 +328,33 @@ ob_start();
         font-size: 13px;
     }
     
+    /* ========== بخش پیشرفت تأیید روی کارت ========== */
+    .approval-progress-mini {
+        margin: 10px 0;
+        padding: 8px;
+        background: #f8fafc;
+        border-radius: 12px;
+    }
+    .progress-mini-bar {
+        background: #e2e8f0;
+        border-radius: 20px;
+        height: 5px;
+        overflow: hidden;
+        margin-bottom: 6px;
+    }
+    .progress-mini-fill {
+        background: linear-gradient(90deg, #10b981, #34d399);
+        height: 100%;
+        border-radius: 20px;
+        transition: width 0.3s;
+    }
+    .progress-mini-stats {
+        font-size: 10px;
+        color: #64748b;
+        text-align: center;
+    }
+    /* ===================================== */
+    
     .holder-box {
         background: #f0f7ff;
         border-radius: 10px;
@@ -345,37 +362,6 @@ ob_start();
         margin: 10px 0;
         text-align: center;
         font-size: 11px;
-    }
-    
-    .status-steps {
-        display: flex;
-        justify-content: space-between;
-        margin: 10px 0;
-        background: #f5f5f5;
-        border-radius: 20px;
-        padding: 5px 8px;
-    }
-    
-    .step-item {
-        font-size: 10px;
-        color: #bbb;
-        text-align: center;
-        flex: 1;
-    }
-    
-    .step-item.active {
-        color: #f39c12;
-        font-weight: bold;
-    }
-    
-    .step-item.completed {
-        color: #2ecc71;
-    }
-    
-    .step-item i {
-        font-size: 12px;
-        display: block;
-        margin-bottom: 3px;
     }
     
     .card-actions {
@@ -404,8 +390,19 @@ ob_start();
     .action-btn.delete:hover { background: #e74c3c; color: white; }
     .action-btn.finalize { background: #fee8e8; color: #e74c3c; }
     .action-btn.finalize:hover { background: #e74c3c; color: white; }
+    .action-btn.approve { background: #d1fae5; color: #059669; }
+    .action-btn.approve:hover { background: #059669; color: white; }
     .action-btn.file { background: #f8f9fa; border: 1px solid #e2e8f0; }
     .action-btn.file:hover { background: #e2e8f0; transform: translateY(-1px); }
+    
+    .action-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-size: 10px;
+    }
     
     .empty-state {
         text-align: center;
@@ -415,6 +412,7 @@ ob_start();
         color: #95a5a6;
         grid-column: 1/-1;
     }
+    
     .btn-create {
         background: linear-gradient(135deg, var(--success), #059669);
         color: white;
@@ -441,9 +439,7 @@ ob_start();
     }
     
     @media (max-width: 480px) {
-        .cards-list {
-            grid-template-columns: 1fr;
-        }
+        .cards-list { grid-template-columns: 1fr; }
         .cart-slide-right { transform: translateX(100px); opacity: 0; }
     }
 </style>
@@ -463,9 +459,9 @@ ob_start();
 
 <div class="stats-grid">
     <div class="stat-card"><div>📋 کل فاکتورها</div><div><?php echo number_format($total_invoices); ?></div></div>
-    <div class="stat-card" style="background: linear-gradient(135deg, #2ecc71, #27ae60);"><div>✅ تایید شده</div><div><?php echo number_format($completed_invoices); ?></div></div>
+    <div class="stat-card" style="background: linear-gradient(135deg, #2ecc71, #27ae60);"><div>✅ نهایی شده</div><div><?php echo number_format($completed_invoices); ?></div></div>
     <div class="stat-card" style="background: linear-gradient(135deg, #f39c12, #e67e22);"><div>⏳ در انتظار</div><div><?php echo number_format($pending_invoices); ?></div></div>
-    <div class="stat-card" style="background: linear-gradient(135deg, #e74c3c, #c0392b);"><div>❌ رد شده</div><div><?php echo number_format($total_invoices - $completed_invoices - $pending_invoices); ?></div></div>
+    <div class="stat-card rejected-card"><div>❌ رد شده</div><div><?php echo number_format($rejected_count); ?></div></div>
     <div class="stat-card draft-card"><div>📝 پیش‌نویس</div><div><?php echo number_format($draft_count); ?></div></div>
 </div>
 
@@ -490,9 +486,10 @@ ob_start();
         <select id="statusFilter">
             <option value="">همه وضعیت‌ها</option>
             <option value="draft" <?php echo $filter_status == 'draft' ? 'selected' : ''; ?>>پیش‌نویس</option>
-            <option value="pending" <?php echo $filter_status == 'pending' ? 'selected' : ''; ?>>در انتظار</option>
-            <option value="forwarded" <?php echo $filter_status == 'forwarded' ? 'selected' : ''; ?>>ارسال شده</option>
-            <option value="approved" <?php echo $filter_status == 'approved' ? 'selected' : ''; ?>>تایید شده</option>
+            <option value="pending_approval" <?php echo $filter_status == 'pending_approval' ? 'selected' : ''; ?>>در انتظار تأیید</option>
+            <option value="partially_approved" <?php echo $filter_status == 'partially_approved' ? 'selected' : ''; ?>>تأیید نسبی</option>
+            <option value="ready_to_close" <?php echo $filter_status == 'ready_to_close' ? 'selected' : ''; ?>>آماده تأیید نهایی</option>
+            <option value="final_approved" <?php echo $filter_status == 'final_approved' ? 'selected' : ''; ?>>نهایی شده</option>
             <option value="rejected" <?php echo $filter_status == 'rejected' ? 'selected' : ''; ?>>رد شده</option>
         </select>
     </div>
@@ -515,14 +512,21 @@ ob_start();
         <?php foreach ($invoices as $inv): 
             $isDraft = ($inv['status'] == 'draft');
             $shamsi_date = jdate('Y/m/d', strtotime($inv['created_at']));
-            $holderText = !empty($inv['holder_user_name']) ? '👤 ' . htmlspecialchars($inv['holder_user_name']) : 
-                         (!empty($inv['holder_department_name']) ? '🏢 ' . htmlspecialchars($inv['holder_department_name']) : '📭 بدون متصدی');
-            $stepCreate = ($inv['status'] != 'draft') ? 'completed' : 'active';
-            $stepReview = ($inv['status'] == 'forwarded' || $inv['status'] == 'approved') ? 'completed' : ($inv['status'] == 'forwarded' ? 'active' : '');
-            $stepApprove = ($inv['status'] == 'approved') ? 'completed active' : '';
+            $total_approvers = $inv['total_approvers'] ?? 0;
+            $approved_count = $inv['approved_count'] ?? 0;
+            $progress_percent = $total_approvers > 0 ? round(($approved_count / $total_approvers) * 100) : 0;
+            
+            // بررسی آیا کاربر باید تأیید کند
+            $needs_approval = false;
+            if (!$isDraft && !in_array($inv['status'], ['final_approved', 'rejected'])) {
+                $check_stmt = $pdo->prepare("SELECT status FROM document_approvals WHERE document_id = ? AND user_id = ?");
+                $check_stmt->execute([$inv['id'], $user_id]);
+                $approval_status = $check_stmt->fetchColumn();
+                $needs_approval = in_array($approval_status, ['pending', 'viewed']);
+            }
         ?>
         <div class="invoice-card">
-            <div class="card-status-bar status-bar-<?php echo $inv['status'] == 'draft' ? 'draft' : $inv['status']; ?>"></div>
+            <div class="card-status-bar status-bar-<?php echo $inv['status']; ?>"></div>
             <div class="card-content">
                 <div class="card-header">
                     <span class="doc-number"><i class="fas fa-file-alt"></i> <?php echo htmlspecialchars($inv['document_number']); ?></span>
@@ -552,19 +556,27 @@ ob_start();
                     <span class="info-value"><?php echo $shamsi_date; ?></span>
                 </div>
                 
-                <div class="holder-box">
-                    <i class="fas fa-location-dot"></i> <strong>📍 در دست:</strong> <?php echo $holderText; ?>
+                <!-- نوار پیشرفت تأیید (برای فاکتورهای در جریان) -->
+                <?php if ($total_approvers > 0 && !in_array($inv['status'], ['final_approved', 'rejected', 'draft'])): ?>
+                <div class="approval-progress-mini">
+                    <div class="progress-mini-bar">
+                        <div class="progress-mini-fill" style="width: <?php echo $progress_percent; ?>%;"></div>
+                    </div>
+                    <div class="progress-mini-stats">
+                        <?php echo $approved_count; ?> از <?php echo $total_approvers; ?> نفر تأیید کردند
+                    </div>
                 </div>
-                
-                <div class="status-steps">
-                    <div class="step-item <?php echo $stepCreate; ?>"><i class="fas fa-pen"></i> ایجاد</div>
-                    <div class="step-item <?php echo $stepReview; ?>"><i class="fas fa-search"></i> بررسی</div>
-                    <div class="step-item <?php echo $stepApprove; ?>"><i class="fas fa-check-circle"></i> تایید</div>
-                </div>
+                <?php endif; ?>
                 
                 <div class="card-actions">
-                    <?php if (!$isDraft): ?>
-                        <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات"><i class="fas fa-eye"></i></a>
+                    <?php if ($needs_approval): ?>
+                        <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn approve" title="تأیید فاکتور">
+                            <i class="fas fa-check-circle"></i> تأیید
+                        </a>
+                    <?php else: ?>
+                        <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات">
+                            <i class="fas fa-eye"></i> مشاهده
+                        </a>
                     <?php endif; ?>
                     
                     <?php if (!empty($inv['file_path'])):
@@ -588,23 +600,16 @@ ob_start();
                     <?php if ($inv['created_by'] == $user_id || $is_admin_user): ?>
                         <?php if ($isDraft): ?>
                             <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn finalize" title="تکمیل"><i class="fas fa-check-circle"></i> تکمیل</a>
-                        <?php else: ?>
+                        <?php elseif (!in_array($inv['status'], ['final_approved', 'rejected'])): ?>
                             <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش"><i class="fas fa-edit"></i></a>
                         <?php endif; ?>
                         
                         <?php 
-                        // وضعیت‌های قابل حذف برای ایجادکننده غیر ادمین
-                        $deletable_statuses = ['draft', 'forwarded', 'pending'];
-                        $is_admin_user = (!empty($user_roles) && (in_array('admin', $user_roles) || in_array('super_admin', $user_roles)));
-                        
+                        $deletable_statuses = ['draft', 'pending_approval', 'partially_approved'];
                         $can_delete_this = false;
-                        
-                        // ادمین همیشه می‌تواند دکمه حذف را ببیند (رمز در صفحه حذف بررسی می‌شود)
                         if ($is_admin_user) {
                             $can_delete_this = true;
-                        } 
-                        // ایجادکننده غیر ادمین فقط فاکتورهای با وضعیت مجاز
-                        elseif ($inv['created_by'] == $user_id && in_array($inv['status'], $deletable_statuses)) {
+                        } elseif ($inv['created_by'] == $user_id && in_array($inv['status'], $deletable_statuses)) {
                             $can_delete_this = true;
                         }
                         ?>
@@ -620,7 +625,6 @@ ob_start();
 </div>
 
 <script>
-// انیمیشن سبد خرید - حرکت به راست و محو (مشابه کامیون)
 function animateCartAndRedirect() {
     var cartIcon = document.getElementById('cartIcon');
     if (cartIcon) {
@@ -657,7 +661,6 @@ document.getElementById('searchInput').addEventListener('keypress', function(e) 
     if (e.key === 'Enter') applyFilters();
 });
 
-// مودال فایل
 function openFileModal(button) {
     const filePath = button.getAttribute('data-file');
     const fileName = button.getAttribute('data-filename') || 'فایل';
@@ -736,7 +739,6 @@ document.addEventListener('keydown', function(e) {
 </div>
 
 <style>
-    /* استایل مودال */
     .file-modal {
         display: none;
         position: fixed;

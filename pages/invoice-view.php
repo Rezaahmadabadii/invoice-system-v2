@@ -29,12 +29,11 @@ try {
     die("خطا در اتصال به پایگاه داده: " . $e->getMessage());
 }
 
-// ========== دریافت اطلاعات کاربر از سشن ==========
+// ========== دریافت اطلاعات کاربر ==========
 $user_id = $_SESSION['user_id'] ?? 0;
 $user_department_id = $_SESSION['user_department_id'] ?? null;
 $user_roles = $_SESSION['user_roles'] ?? [];
 
-// اگر user_roles خالی است، از دیتابیس بخوان
 if (empty($user_roles) && $user_id > 0) {
     $stmt = $pdo->prepare("SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = ?");
     $stmt->execute([$user_id]);
@@ -42,28 +41,23 @@ if (empty($user_roles) && $user_id > 0) {
     $_SESSION['user_roles'] = $user_roles;
 }
 
-// اگر user_department_id خالی است، از دیتابیس بخوان
 if (!$user_department_id && $user_id > 0) {
     $stmt = $pdo->prepare("SELECT department_id FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
     $user_department_id = $stmt->fetchColumn();
     $_SESSION['user_department_id'] = $user_department_id;
 }
-// =================================================
 
+// ========== دریافت اطلاعات فاکتور ==========
 $stmt = $pdo->prepare("
     SELECT d.*, 
            c.name as company_name, 
            c.short_name,
            v.name as vendor_name,
-           holder_dep.name as holder_department_name,
-           holder_user.full_name as holder_user_name,
            creator.full_name as creator_name
     FROM documents d
     LEFT JOIN companies c ON d.company_id = c.id
     LEFT JOIN vendors v ON d.vendor_id = v.id
-    LEFT JOIN roles holder_dep ON d.current_holder_department_id = holder_dep.id
-    LEFT JOIN users holder_user ON d.current_holder_user_id = holder_user.id
     LEFT JOIN users creator ON d.created_by = creator.id
     WHERE d.id = ? AND d.type = 'invoice'
 ");
@@ -75,205 +69,118 @@ if (!$invoice) {
     exit;
 }
 
-// بقیه کدهای متغیرها (is_creator, is_holder و ...)
-$is_creator = ($invoice['created_by'] == $user_id);
-$is_holder_user = ($invoice['current_holder_user_id'] == $user_id);
-$is_holder_department = ($invoice['current_holder_department_id'] == $user_department_id);
-$is_holder = ($is_holder_user || $is_holder_department);
-$is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
-
-$is_locked = in_array($invoice['status'], ['approved', 'rejected']);
-$is_draft = ($invoice['status'] == 'draft');
-
-$can_forward = $is_holder && !$is_locked && !$is_draft;
-$can_approve_reject = ($is_creator || $is_admin) && !$is_locked && !$is_draft;
-$can_cancel_forward = ($is_creator && $invoice['status'] == 'forwarded' && !$is_holder && !$is_locked && !$is_draft);
-$can_return_to_sender = false; // پیش‌نویس این گزینه را هم ندارد
-
-// اگر پیش‌نویس است، همه اقدامات غیرفعال شوند
-if ($is_draft) {
-    $can_forward = false;
-    $can_approve_reject = false;
-    $can_cancel_forward = false;
-    $can_return_to_sender = false;
-}
-// گیرنده می‌تواند به ارسال‌کننده برگرداند
-$can_return_to_sender = false;
-if (!$is_locked && $is_holder && $invoice['status'] == 'forwarded') {
-    $last_sender_stmt = $pdo->prepare("
-        SELECT from_user_id FROM forwarding_history 
-        WHERE document_id = ? AND action = 'forward' 
-        ORDER BY created_at DESC LIMIT 1
-    ");
-    $last_sender_stmt->execute([$id]);
-    $last_sender = $last_sender_stmt->fetchColumn();
-    $can_return_to_sender = ($last_sender && $last_sender != $user_id);
-}
-
-// دریافت لیست بخش‌ها و کاربران (به جز خود کاربر)
-$departments = $pdo->query("SELECT id, name FROM roles WHERE is_department = 1 ORDER BY name")->fetchAll();
-
-$users_stmt = $pdo->prepare("
-    SELECT id, full_name, username 
-    FROM users 
-    WHERE id != ? 
-    ORDER BY full_name
+// ========== دریافت وضعیت تأیید کاربران ==========
+$approvals_stmt = $pdo->prepare("
+    SELECT da.*, u.full_name, u.username 
+    FROM document_approvals da
+    JOIN users u ON da.user_id = u.id
+    WHERE da.document_id = ?
+    ORDER BY 
+        FIELD(da.status, 'pending', 'viewed', 'approved', 'rejected'),
+        da.created_at ASC
 ");
-$users_stmt->execute([$user_id]);
-$users = $users_stmt->fetchAll();
+$approvals_stmt->execute([$id]);
+$approvals = $approvals_stmt->fetchAll();
 
-// دیباگ در کنسول جاوااسکریپت
-$debug_data = [
-    'current_user_id' => $user_id,
-    'other_users_count' => count($users),
-    'other_users_list' => array_map(function($u) {
-        return ['id' => $u['id'], 'name' => $u['full_name']];
-    }, $users)
+$status_labels = [
+    'pending' => ['text' => 'در انتظار تأیید', 'class' => 'status-pending', 'icon' => '⏳'],
+    'viewed' => ['text' => 'مشاهده و در حال بررسی', 'class' => 'status-viewed', 'icon' => '👀'],
+    'approved' => ['text' => 'تأیید شده', 'class' => 'status-approved', 'icon' => '✅'],
+    'rejected' => ['text' => 'رد شده', 'class' => 'status-rejected', 'icon' => '❌']
 ];
-echo "<script>console.log('🔍 دیباگ ارجاع:', " . json_encode($debug_data, JSON_PRETTY_PRINT) . ");</script>";
 
+$total_approvers = count($approvals);
+$approved_count = count(array_filter($approvals, fn($a) => $a['status'] == 'approved'));
+$rejected_count = count(array_filter($approvals, fn($a) => $a['status'] == 'rejected'));
+$pending_count = $total_approvers - ($approved_count + $rejected_count);
+$all_approved = ($approved_count == $total_approvers && $total_approvers > 0);
+
+$current_status = $invoice['status'];
+$is_creator = ($invoice['created_by'] == $user_id);
+$is_admin = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
+$is_final_closed = in_array($current_status, ['final_approved', 'rejected']);
+
+// بررسی آیا کاربر جاری باید تأیید کند
+$user_approval = null;
+foreach ($approvals as $a) {
+    if ($a['user_id'] == $user_id) {
+        $user_approval = $a;
+        break;
+    }
+}
+$can_approve = ($user_approval && in_array($user_approval['status'], ['pending', 'viewed']) && !$is_creator && !$is_final_closed);
+$can_final_close = ($is_creator && $all_approved && $current_status != 'final_approved' && $current_status != 'rejected');
+$is_draft = ($current_status == 'draft');
+
+// ========== پردازش POST ==========
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $action = $_POST['action'] ?? '';
+    $comment = trim($_POST['comment'] ?? '');
+    
+    // تأیید توسط کاربر دریافت‌کننده
+    if ($action == 'approve_invoice' && $can_approve) {
+        // به‌روزرسانی وضعیت در document_approvals
+        $update = $pdo->prepare("UPDATE document_approvals SET status = 'approved', action_at = NOW(), comment = ? WHERE document_id = ? AND user_id = ?");
+        $update->execute([$comment, $id, $user_id]);
+        
+        // به‌روزرسانی آمار در documents
+        $new_approved_count = $approved_count + 1;
+        $new_status = ($new_approved_count == $total_approvers) ? 'ready_to_close' : 'partially_approved';
+        $pdo->prepare("UPDATE documents SET approved_count = ?, status = ? WHERE id = ?")->execute([$new_approved_count, $new_status, $id]);
+        
+        // ثبت در تاریخچه
+        $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'approve', ?)");
+        $history->execute([$id, $user_id, $comment]);
+        
+        $success = 'فاکتور با موفقیت تأیید شد.';
+        echo '<script>setTimeout(function() { window.location.reload(); }, 1500);</script>';
+    }
+    
+    // رد توسط کاربر دریافت‌کننده
+    elseif ($action == 'reject_invoice' && $can_approve) {
+        if (empty($comment)) {
+            $error = 'لطفاً دلیل رد را وارد کنید';
+        } else {
+            $update = $pdo->prepare("UPDATE document_approvals SET status = 'rejected', action_at = NOW(), comment = ? WHERE document_id = ? AND user_id = ?");
+            $update->execute([$comment, $id, $user_id]);
+            
+            $new_rejected_count = $rejected_count + 1;
+            $pdo->prepare("UPDATE documents SET rejected_count = ?, status = 'rejected' WHERE id = ?")->execute([$new_rejected_count, $id]);
+            
+            $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'reject', ?)");
+            $history->execute([$id, $user_id, $comment]);
+            
+            $success = 'فاکتور رد شد.';
+            echo '<script>setTimeout(function() { window.location.reload(); }, 1500);</script>';
+        }
+    }
+    
+    // تأیید نهایی توسط ایجادکننده
+    elseif ($action == 'final_approve' && $can_final_close) {
+        $update = $pdo->prepare("UPDATE documents SET status = 'final_approved', final_closed_by = ?, final_closed_at = NOW() WHERE id = ?");
+        $update->execute([$user_id, $id]);
+        
+        $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'final_approve', ?)");
+        $history->execute([$id, $user_id, 'تأیید نهایی و بستن فاکتور']);
+        
+        $success = 'فاکتور با موفقیت تأیید نهایی و بسته شد.';
+        echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
+    }
+}
+
+// ========== دریافت تاریخچه ==========
 $history_stmt = $pdo->prepare("
     SELECT fh.*, 
            u_from.full_name as from_name,
-           u_to.full_name as to_name,
-           r_to.name as to_department_name
+           u_to.full_name as to_name
     FROM forwarding_history fh
     LEFT JOIN users u_from ON fh.from_user_id = u_from.id
     LEFT JOIN users u_to ON fh.to_user_id = u_to.id
-    LEFT JOIN roles r_to ON fh.to_department_id = r_to.id
     WHERE fh.document_id = ?
     ORDER BY fh.created_at ASC
 ");
 $history_stmt->execute([$id]);
 $history = $history_stmt->fetchAll();
-
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $action = $_POST['action'] ?? '';
-    $notes = trim($_POST['notes'] ?? '');
-    $to_department = $_POST['to_department'] ?? '';
-    $to_user = $_POST['to_user'] ?? '';
-    
-    // ========== ارجاع به شخص یا بخش ==========
-    if ($action == 'forward') {
-        if (!$can_forward) {
-            $error = 'شما مجاز به ارجاع این فاکتور نیستید.';
-        } elseif (empty($to_department) && empty($to_user)) {
-            $error = 'لطفاً بخش یا شخص مقصد را انتخاب کنید';
-        } elseif (empty($notes)) {
-            $error = 'لطفاً توضیحات را وارد کنید';
-        } else {
-            if (!empty($to_user)) {
-                $new_holder_user_id = $to_user;
-                $new_holder_department_id = null;
-            } else {
-                $new_holder_user_id = null;
-                $new_holder_department_id = $to_department;
-            }
-            
-            $update = $pdo->prepare("UPDATE documents SET status = 'forwarded', current_holder_department_id = ?, current_holder_user_id = ? WHERE id = ?");
-            $update->execute([$new_holder_department_id, $new_holder_user_id, $id]);
-            
-            $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_department_id, to_user_id, action, notes) VALUES (?, ?, ?, ?, 'forward', ?)");
-            $insert->execute([$id, $_SESSION['user_id'], $new_holder_department_id, $new_holder_user_id, $notes]);
-            
-            $success = 'فاکتور با موفقیت ارجاع شد.';
-            echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
-        }
-    }
-    
-    // ========== برگشت ارجاع (فقط توسط ایجادکننده قبل از اقدام) ==========
-    elseif ($action == 'cancel_forward') {
-        if (!$can_cancel_forward) {
-            $error = 'شما مجاز به برگشت این ارجاع نیستید.';
-        } elseif (empty($notes)) {
-            $error = 'لطفاً دلیل برگشت ارجاع را وارد کنید';
-        } else {
-            // پیدا کردن آخرین ارسال‌کننده
-            $last_sender_stmt = $pdo->prepare("
-                SELECT from_user_id FROM forwarding_history 
-                WHERE document_id = ? AND action = 'forward' 
-                ORDER BY created_at DESC LIMIT 1
-            ");
-            $last_sender_stmt->execute([$id]);
-            $original_sender = $last_sender_stmt->fetchColumn();
-            
-            $update = $pdo->prepare("UPDATE documents SET current_holder_user_id = ?, current_holder_department_id = NULL, status = 'pending' WHERE id = ?");
-            $update->execute([$original_sender, $id]);
-            
-            $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_user_id, action, notes) VALUES (?, ?, ?, 'cancel_forward', ?)");
-            $insert->execute([$id, $_SESSION['user_id'], $original_sender, $notes]);
-            
-            $success = 'ارجاع فاکتور با موفقیت برگشت داده شد.';
-            echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
-        }
-    }
-    
-    // ========== برگشت به ارسال‌کننده (برای گیرنده قبل از اقدام) - دکمه جداگانه ==========
-    elseif ($action == 'return_to_sender') {
-        if (!$can_return_to_sender) {
-            $error = 'شما مجاز به برگشت این فاکتور نیستید.';
-        } else {
-            $last_sender_stmt = $pdo->prepare("
-                SELECT from_user_id FROM forwarding_history 
-                WHERE document_id = ? AND action = 'forward' 
-                ORDER BY created_at DESC LIMIT 1
-            ");
-            $last_sender_stmt->execute([$id]);
-            $original_sender = $last_sender_stmt->fetchColumn();
-            
-            $notes = $_POST['notes'] ?? 'درخواست برگشت فایل به ارسال‌کننده';
-            
-            if ($original_sender) {
-                $update = $pdo->prepare("UPDATE documents SET current_holder_user_id = ?, current_holder_department_id = NULL, status = 'pending' WHERE id = ?");
-                $update->execute([$original_sender, $id]);
-                
-                $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, to_user_id, action, notes) VALUES (?, ?, ?, 'return_to_sender', ?)");
-                $insert->execute([$id, $_SESSION['user_id'], $original_sender, $notes]);
-                
-                $success = 'فایل با موفقیت به ارسال‌کننده برگشت داده شد.';
-                echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
-            } else {
-                $error = 'خطا در پیدا کردن ارسال‌کننده اصلی';
-            }
-        }
-    }
-    
-    // ========== تایید نهایی ==========
-    elseif ($action == 'approve') {
-        if (!$can_approve_reject) {
-            $error = 'شما مجاز به تایید این فاکتور نیستید.';
-        } else {
-            $update = $pdo->prepare("UPDATE documents SET status = 'approved' WHERE id = ?");
-            $update->execute([$id]);
-            
-            $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'approve', ?)");
-            $insert->execute([$id, $_SESSION['user_id'], $notes]);
-            
-            $success = 'فاکتور با موفقیت تایید نهایی شد.';
-            echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
-        }
-    }
-    
-    // ========== رد فاکتور ==========
-    elseif ($action == 'reject') {
-        if (!$can_approve_reject) {
-            $error = 'شما مجاز به رد این فاکتور نیستید.';
-        } elseif (empty($notes)) {
-            $error = 'لطفاً دلیل رد را وارد کنید';
-        } else {
-            $update = $pdo->prepare("UPDATE documents SET status = 'rejected', rejection_reason = ? WHERE id = ?");
-            $update->execute([$notes, $id]);
-            
-            $insert = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'reject', ?)");
-            $insert->execute([$id, $_SESSION['user_id'], $notes]);
-            
-            $success = 'فاکتور رد شد.';
-            echo '<script>setTimeout(function() { window.location.href = "inbox.php"; }, 1500);</script>';
-        }
-    } else {
-        $error = 'اقدام نامعتبر است.';
-    }
-}
 
 $page_title = 'مشاهده فاکتور';
 ob_start();
@@ -420,10 +327,14 @@ ob_start();
         font-weight: 500;
     }
     .status-pending { background: #fef9e6; color: #d4a017; }
-    .status-forwarded { background: #fff3cd; color: #f39c12; }
+    .status-viewed { background: #e0f2fe; color: #0284c7; }
     .status-approved { background: #d4edda; color: #2ecc71; }
     .status-rejected { background: #f8d7da; color: #e74c3c; }
     .status-draft { background: #f5f5f5; color: #95a5a6; }
+    .status-ready_to_close { background: #fef3c7; color: #d97706; }
+    .status-final_approved { background: #10b981; color: white; }
+    .status-partially_approved { background: #dbeafe; color: #1d4ed8; }
+    .status-pending_approval { background: #fef3c7; color: #b45309; }
     
     .holder-box {
         background: var(--primary-light);
@@ -482,6 +393,84 @@ ob_start();
         font-size: 11px;
     }
     
+    /* ========== استایل بخش تأیید کاربران ========== */
+    .approval-section {
+        margin-bottom: 24px;
+    }
+    .progress-bar-container {
+        background: #e2e8f0;
+        border-radius: 30px;
+        height: 8px;
+        overflow: hidden;
+        margin-bottom: 16px;
+    }
+    .progress-fill {
+        background: linear-gradient(90deg, var(--success), #34d399);
+        height: 100%;
+        border-radius: 30px;
+        transition: width 0.5s ease;
+    }
+    .progress-stats {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-bottom: 20px;
+    }
+    .stat-item {
+        font-size: 12px;
+        color: var(--text-muted);
+    }
+    .approvers-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+    }
+    .approver-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+        background: #f8fafc;
+        border-radius: 16px;
+        border: 1px solid #e2e8f0;
+        transition: all 0.2s;
+    }
+    .approver-item:hover {
+        background: white;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .approver-icon {
+        font-size: 28px;
+    }
+    .approver-info {
+        flex: 1;
+    }
+    .approver-name {
+        font-weight: 600;
+        font-size: 13px;
+        margin-bottom: 4px;
+    }
+    .approver-status-text {
+        font-size: 10px;
+        padding: 2px 8px;
+        border-radius: 20px;
+        display: inline-block;
+    }
+    .approver-comment {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 6px;
+        padding-top: 4px;
+        border-top: 1px dashed #eee;
+    }
+    .approver-time {
+        font-size: 10px;
+        color: var(--text-muted);
+    }
+    
+    /* ========== استایل فرم تأیید/رد ========== */
     .action-form {
         background: white;
         border-radius: 20px;
@@ -489,28 +478,6 @@ ob_start();
         margin-bottom: 24px;
         border: 1px solid var(--border);
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-    }
-    .form-group {
-        margin-bottom: 15px;
-    }
-    .form-group label {
-        display: block;
-        font-size: 12px;
-        font-weight: 500;
-        margin-bottom: 6px;
-        color: var(--text-main);
-    }
-    .form-group select, .form-group textarea {
-        width: 100%;
-        padding: 10px 12px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        font-size: 13px;
-    }
-    .row-2col {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 15px;
     }
     .btn-submit {
         background: linear-gradient(135deg, var(--primary), var(--secondary));
@@ -521,18 +488,22 @@ ob_start();
         cursor: pointer;
         font-size: 13px;
         font-weight: 600;
+        transition: all 0.2s;
     }
-    .btn-cancel {
+    .btn-submit:hover {
+        transform: translateY(-1px);
+    }
+    .btn-approve-custom {
+        background: linear-gradient(135deg, #10b981, #059669);
+    }
+    .btn-reject-custom {
         background: linear-gradient(135deg, #ef4444, #dc2626);
-        color: white;
-        border: none;
-        padding: 10px 24px;
-        border-radius: 40px;
-        cursor: pointer;
-        font-size: 13px;
-        font-weight: 600;
+    }
+    .btn-final-custom {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
     }
     
+    /* ========== استایل تاریخچه ========== */
     .history-wrapper {
         max-height: 250px;
         overflow-y: auto;
@@ -564,11 +535,9 @@ ob_start();
         border-radius: 20px;
         font-size: 10px;
     }
-    .action-forward { background: #fff3cd; color: #f39c12; }
     .action-approve { background: #d4edda; color: #2ecc71; }
     .action-reject { background: #f8d7da; color: #e74c3c; }
-    .action-cancel { background: #fee2e2; color: #dc2626; }
-    .action-return { background: #fed7aa; color: #ea580c; }
+    .action-final { background: #fef3c7; color: #d97706; }
     
     .alert {
         padding: 12px 16px;
@@ -617,6 +586,9 @@ ob_start();
         .three-columns {
             grid-template-columns: repeat(2, 1fr);
         }
+        .approvers-list {
+            grid-template-columns: 1fr;
+        }
     }
     @media (max-width: 768px) {
         .three-columns {
@@ -625,9 +597,6 @@ ob_start();
         .view-wrapper {
             padding: 16px;
         }
-        .row-2col {
-            grid-template-columns: 1fr;
-        }
     }
 </style>
 
@@ -635,7 +604,7 @@ ob_start();
     <div class="page-header">
         <h1 class="page-title"><i class="fas fa-file-invoice"></i> مشاهده فاکتور</h1>
         <div style="display: flex; gap: 12px;">
-            <?php if ($is_creator): ?>
+            <?php if ($is_creator && $is_draft): ?>
                 <a href="invoice-edit.php?id=<?php echo $id; ?>" style="background: var(--primary); color: white; padding: 8px 18px; border-radius: 30px; text-decoration: none; font-size: 13px;">
                     <i class="fas fa-edit"></i> ویرایش
                 </a>
@@ -679,6 +648,12 @@ ob_start();
                     <span class="info-label">📅 تاریخ فاکتور</span>
                     <span class="info-value"><?php echo htmlspecialchars($invoice['document_date']); ?></span>
                 </div>
+                <?php if ($invoice['description']): ?>
+                <div class="info-row">
+                    <span class="info-label">📝 توضیحات</span>
+                    <span class="info-value"><?php echo nl2br(htmlspecialchars($invoice['description'])); ?></span>
+                </div>
+                <?php endif; ?>
             </div>
         </div>
         
@@ -701,7 +676,14 @@ ob_start();
                     <span class="info-value">
                         <?php
                         $status_class = 'status-' . ($invoice['status'] ?? 'pending');
-                        $status_texts = ['pending' => '⏳ در انتظار', 'forwarded' => '🔄 در حال بررسی', 'approved' => '✅ تایید شده', 'rejected' => '❌ رد شده', 'draft' => '📝 پیش‌نویس'];
+                        $status_texts = [
+                            'draft' => '📝 پیش‌نویس',
+                            'pending_approval' => '⏳ در انتظار تأیید کاربران',
+                            'partially_approved' => '🔄 تأیید نسبی',
+                            'rejected' => '❌ رد شده',
+                            'ready_to_close' => '✅ آماده تأیید نهایی',
+                            'final_approved' => '🎉 تأیید نهایی و بسته شده'
+                        ];
                         echo '<span class="status-badge ' . $status_class . '">' . ($status_texts[$invoice['status']] ?? $invoice['status']) . '</span>';
                         ?>
                     </span>
@@ -718,11 +700,12 @@ ob_start();
         <div class="info-card card-green">
             <div class="card-header">
                 <i class="fas fa-paperclip"></i>
-                <h3>فایل و وضعیت در دست</h3>
+                <h3>فایل فاکتور</h3>
             </div>
             <div class="card-body">
                 <?php if ($invoice['file_path'] && file_exists(__DIR__ . '/../' . $invoice['file_path'])): 
-                    $file_url = '/invoice-system-v2/' . $invoice['file_path'];
+                    $web_path = str_replace('\\', '/', $invoice['file_path']);
+                    $file_url = '/invoice-system-v2/' . $web_path;
                     $file_ext = strtolower(pathinfo($invoice['file_path'], PATHINFO_EXTENSION));
                     $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
                 ?>
@@ -744,292 +727,99 @@ ob_start();
                         <i class="fas fa-cloud-upload-alt"></i> هیچ فایلی آپلود نشده است
                     </div>
                 <?php endif; ?>
-                
-                <div class="holder-box">
-                    <i class="fas fa-location-dot"></i>
-                    <strong>📍 در دست:</strong><br>
-                    <?php 
-                    if ($invoice['holder_user_name']) {
-                        echo '👤 ' . htmlspecialchars($invoice['holder_user_name']);
-                    } elseif ($invoice['holder_department_name']) {
-                        echo '🏢 ' . htmlspecialchars($invoice['holder_department_name']);
-                    } else {
-                        echo '📭 بدون متصدی';
-                    }
-                    ?>
-                </div>
-                
-                <div class="status-steps">
-                    <div class="step-item <?php echo ($invoice['status'] != 'draft') ? 'completed' : 'active'; ?>">
-                        <i class="fas fa-pen"></i> ایجاد
-                    </div>
-                    <div class="step-item <?php echo ($invoice['status'] == 'forwarded' || $invoice['status'] == 'approved') ? 'completed' : ($invoice['status'] == 'forwarded' ? 'active' : ''); ?>">
-                        <i class="fas fa-search"></i> بررسی
-                    </div>
-                    <div class="step-item <?php echo ($invoice['status'] == 'approved') ? 'completed active' : ''; ?>">
-                        <i class="fas fa-check-circle"></i> تایید
-                    </div>
-                </div>
             </div>
         </div>
     </div>
     
-    <?php if ($invoice['description']): ?>
-    <div class="info-card" style="margin-bottom: 24px;">
+    <!-- ========== بخش وضعیت تأیید کاربران ========== -->
+    <?php if ($total_approvers > 0): ?>
+    <div class="info-card approval-section">
         <div class="card-header">
-            <i class="fas fa-align-right"></i>
-            <h3>توضیحات فاکتور</h3>
+            <i class="fas fa-users"></i>
+            <h3>وضعیت تأیید کاربران</h3>
         </div>
         <div class="card-body">
-            <div style="font-size: 13px; color: var(--text-main); line-height: 1.6;"><?php echo nl2br(htmlspecialchars($invoice['description'])); ?></div>
+            <!-- نوار پیشرفت -->
+            <div class="progress-bar-container">
+                <div class="progress-fill" style="width: <?php echo $total_approvers > 0 ? (($approved_count / $total_approvers) * 100) : 0; ?>%;"></div>
+            </div>
+            <div class="progress-stats">
+                <span class="stat-item">✅ تأیید شده: <?php echo $approved_count; ?></span>
+                <span class="stat-item">❌ رد شده: <?php echo $rejected_count; ?></span>
+                <span class="stat-item">⏳ در انتظار: <?php echo $pending_count; ?></span>
+                <span class="stat-item">👥 کل: <?php echo $total_approvers; ?></span>
+            </div>
+            
+            <!-- لیست کاربران با وضعیت -->
+            <div class="approvers-list">
+                <?php foreach ($approvals as $approver): 
+                    $status_info = $status_labels[$approver['status']] ?? ['text' => $approver['status'], 'class' => 'status-pending', 'icon' => '📌'];
+                ?>
+                <div class="approver-item">
+                    <div class="approver-icon"><?php echo $status_info['icon']; ?></div>
+                    <div class="approver-info">
+                        <div class="approver-name"><?php echo htmlspecialchars($approver['full_name']); ?></div>
+                        <span class="approver-status-text" style="background: <?php echo $approver['status'] == 'approved' ? '#d1fae5' : ($approver['status'] == 'rejected' ? '#fee2e2' : '#fef3c7'); ?>; color: <?php echo $approver['status'] == 'approved' ? '#065f46' : ($approver['status'] == 'rejected' ? '#b91c1c' : '#b45309'); ?>;">
+                            <?php echo $status_info['text']; ?>
+                        </span>
+                        <?php if (!empty($approver['comment'])): ?>
+                            <div class="approver-comment">💬 <?php echo nl2br(htmlspecialchars($approver['comment'])); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($approver['action_at']): ?>
+                        <div class="approver-time"><?php echo jdate('H:i Y/m/d', strtotime($approver['action_at'])); ?></div>
+                    <?php endif; ?>
+                </div>
+                <?php endforeach; ?>
+            </div>
         </div>
     </div>
     <?php endif; ?>
     
-    <?php if ($invoice['description']): ?>
-    <div class="info-card" style="margin-bottom: 24px;">
-        <div class="card-header">
-            <i class="fas fa-align-right"></i>
-            <h3>توضیحات فاکتور</h3>
-        </div>
-        <div class="card-body">
-            <div style="font-size: 13px; color: var(--text-main); line-height: 1.6;"><?php echo nl2br(htmlspecialchars($invoice['description'])); ?></div>
-        </div>
-    </div>
-    <?php endif; ?>
-    
-    <?php if ($is_draft && $is_creator): ?>
-    <div class="action-form" style="background: #fef3c7; text-align: center; border: 1px solid #fde68a;">
-        <p style="margin-bottom: 15px;">📝 این فاکتور در حالت پیش‌نویس است.</p>
-        <div style="display: flex; gap: 10px; justify-content: center;">
-            <form method="POST" action="invoice-edit.php?id=<?php echo $id; ?>" style="display: inline-block; margin: 0;">
-                <input type="hidden" name="complete_invoice" value="1">
-                <button type="submit" class="btn" style="background: #f59e0b; color: white; padding: 8px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px;">
-                    ✏️ تکمیل و ارسال
+    <!-- ========== فرم تأیید/رد برای کاربر دریافت‌کننده ========== -->
+    <?php if ($can_approve): ?>
+    <div class="action-form" style="background: #f0fdf4;">
+        <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-check-circle" style="color: var(--success);"></i> تأیید یا رد فاکتور</h3>
+        <form method="POST">
+            <div class="form-group">
+                <label>نظر شما <span style="color: var(--danger);">*</span></label>
+                <textarea name="comment" id="commentText" rows="2" placeholder="لطفاً نظر خود را وارد کنید...(در صورت رد، توضیح دلیل الزامی است)" style="width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--border);"></textarea>
+            </div>
+            <div style="display: flex; gap: 12px; justify-content: flex-end;">
+                <button type="submit" name="action" value="reject_invoice" class="btn-submit btn-reject-custom" id="rejectBtn">
+                    <i class="fas fa-times"></i> رد فاکتور
                 </button>
-            </form>
-            <?php 
-            // وضعیت‌های قابل حذف: draft, forwarded, pending
-            $deletable_statuses = ['draft', 'forwarded', 'pending'];
-            if (in_array($invoice['status'], $deletable_statuses)): ?>
-                <a href="invoice-delete.php?id=<?php echo $id; ?>" class="btn" style="background: #ef4444; color: white; padding: 8px 20px; border-radius: 8px; text-decoration: none;" onclick="return confirm('حذف شود؟')">
-                    🗑️ حذف پیش‌نویس
-                </a>
-            <?php endif; ?>
-        </div>
-    </div>
-    <?php endif; ?>
-	
-    <?php if ($can_forward || $can_approve_reject): ?>
-    <div class="action-form">
-        <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-bolt" style="color: var(--accent);"></i> اقدامات روی فاکتور</h3>
-        
-        <form method="POST" id="actionForm">
-            <div class="form-group">
-                <label>انتخاب اقدام <span style="color: var(--danger);">*</span></label>
-                <select name="action" id="actionSelect" required>
-                    <option value="">--- انتخاب کنید ---</option>
-                    <?php if ($can_forward): ?>
-                        <option value="forward">🔄 بررسی و پیگیری (ارجاع)</option>
-                    <?php endif; ?>
-                    <?php if ($can_approve_reject): ?>
-                        <option value="approve">✅ تایید نهایی</option>
-                        <option value="reject">❌ رد فاکتور</option>
-                    <?php endif; ?>
-                </select>
-            </div>
-            
-            <div id="forwardFields" style="display: none;">
-                <div class="form-group">
-                    <label>نوع ارجاع <span style="color: var(--danger);">*</span></label>
-                    <div style="display: flex; gap: 20px; margin-top: 8px;">
-                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                            <input type="radio" name="forward_type" value="department" id="forwardDeptRadio" checked>
-                            <i class="fas fa-building"></i> ارجاع به بخش
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                            <input type="radio" name="forward_type" value="user" id="forwardUserRadio">
-                            <i class="fas fa-user"></i> ارجاع به شخص
-                        </label>
-                    </div>
-                </div>
-                
-                <div class="row-2col">
-                    <div class="form-group" id="departmentSelect">
-                        <label>📋 انتخاب بخش</label>
-                        <select name="to_department" id="forwardDepartment">
-                            <option value="">--- انتخاب کنید ---</option>
-                            <?php foreach ($departments as $dept): ?>
-                                <option value="<?php echo $dept['id']; ?>">🏢 <?php echo htmlspecialchars($dept['name']); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="form-group" id="userSelect" style="display: none;">
-                        <label>👤 انتخاب شخص</label>
-                        <select name="to_user" id="forwardUser">
-                            <option value="">--- انتخاب کنید ---</option>
-                            <?php 
-                            $other_users = array_filter($users, function($u) use ($user_id) {
-                                return $u['id'] != $user_id;
-                            });
-                            if (count($other_users) > 0):
-                                foreach ($other_users as $user): ?>
-                                    <option value="<?php echo $user['id']; ?>">👤 <?php echo htmlspecialchars($user['full_name']); ?></option>
-                                <?php endforeach; 
-                            else: ?>
-                                <option value="" disabled>هیچ کاربر دیگری یافت نشد</option>
-                            <?php endif; ?>
-                        </select>
-                    </div>
-            
-            <div class="form-group">
-                <label>📝 توضیحات <span id="notesRequiredStar" style="color: var(--danger);">*</span></label>
-                <textarea name="notes" id="actionNotes" rows="2" placeholder="توضیحات خود را وارد کنید..."></textarea>
-            </div>
-            
-            <div style="display: flex; gap: 10px;">
-                <button type="submit" class="btn-submit" id="submitBtn">✅ ثبت اقدام</button>
+                <button type="submit" name="action" value="approve_invoice" class="btn-submit btn-approve-custom">
+                    <i class="fas fa-check"></i> تأیید فاکتور
+                </button>
             </div>
         </form>
     </div>
-    
-    <script>
-        const actionSelect = document.getElementById('actionSelect');
-        const forwardFields = document.getElementById('forwardFields');
-        const actionNotes = document.getElementById('actionNotes');
-        const notesRequiredStar = document.getElementById('notesRequiredStar');
-        
-        function toggleFields() {
-            const val = actionSelect.value;
-            forwardFields.style.display = 'none';
-            
-            if (val === 'forward') {
-                forwardFields.style.display = 'block';
-                actionNotes.required = true;
-                notesRequiredStar.style.display = 'inline';
-                actionNotes.placeholder = 'لطفاً دلیل بررسی و پیگیری را وارد کنید...';
-            } else if (val === 'reject') {
-                forwardFields.style.display = 'none';
-                actionNotes.required = true;
-                notesRequiredStar.style.display = 'inline';
-                actionNotes.placeholder = 'لطفاً دلیل رد را وارد کنید...';
-            } else if (val === 'approve') {
-                forwardFields.style.display = 'none';
-                actionNotes.required = false;
-                notesRequiredStar.style.display = 'none';
-                actionNotes.placeholder = '(اختیاری) توضیحات...';
-            } else {
-                actionNotes.required = false;
-                notesRequiredStar.style.display = 'none';
-            }
-        }
-        
-        actionSelect.addEventListener('change', toggleFields);
-        toggleFields();
-        
-        const forwardDeptRadio = document.getElementById('forwardDeptRadio');
-        const forwardUserRadio = document.getElementById('forwardUserRadio');
-        const departmentSelect = document.getElementById('departmentSelect');
-        const userSelect = document.getElementById('userSelect');
-        const forwardDepartment = document.getElementById('forwardDepartment');
-        const forwardUser = document.getElementById('forwardUser');
-        
-        function updateForwardFields() {
-            if (forwardDeptRadio.checked) {
-                departmentSelect.style.display = 'block';
-                userSelect.style.display = 'none';
-                forwardDepartment.disabled = false;
-                forwardUser.disabled = true;
-                forwardUser.value = '';
-            } else {
-                departmentSelect.style.display = 'none';
-                userSelect.style.display = 'block';
-                forwardDepartment.disabled = true;
-                forwardUser.disabled = false;
-                forwardDepartment.value = '';
-            }
-        }
-        
-        if (forwardDeptRadio && forwardUserRadio) {
-            forwardDeptRadio.addEventListener('change', updateForwardFields);
-            forwardUserRadio.addEventListener('change', updateForwardFields);
-            updateForwardFields();
-        }
-        
-        document.getElementById('submitBtn').addEventListener('click', function(e) {
-            const selectedAction = actionSelect.value;
-            
-            if (selectedAction === '') {
-                e.preventDefault();
-                alert('لطفاً یک اقدام را انتخاب کنید');
-                return false;
-            }
-            
-            if (selectedAction === 'forward') {
-                const forwardType = document.querySelector('input[name="forward_type"]:checked');
-                if (!forwardType) {
-                    e.preventDefault();
-                    alert('لطفاً نوع ارجاع را انتخاب کنید (بخش یا شخص)');
-                    return false;
-                }
-                
-                if (forwardType.value === 'department') {
-                    const dept = forwardDepartment.value;
-                    if (!dept) {
-                        e.preventDefault();
-                        alert('لطفاً بخش مقصد را انتخاب کنید');
-                        return false;
-                    }
-                } else {
-                    const user = forwardUser.value;
-                    if (!user) {
-                        e.preventDefault();
-                        alert('لطفاً شخص مقصد را انتخاب کنید');
-                        return false;
-                    }
-                }
-            }
-            
-            const notes = actionNotes.value.trim();
-            if ((selectedAction === 'forward' || selectedAction === 'reject') && notes === '') {
-                e.preventDefault();
-                alert('لطفاً توضیحات را وارد کنید');
-                return false;
-            }
-        });
-    </script>
     <?php endif; ?>
-
-    <?php if ($can_cancel_forward || $can_return_to_sender): ?>
-    <div class="action-form">
-        <div style="display: flex; justify-content: flex-end; align-items: center; gap: 15px; flex-wrap: wrap;">
-            <?php if ($can_cancel_forward): ?>
-                <form method="POST" onsubmit="return confirm('آیا از برگرداندن این فایل به وضعیت قبلی اطمینان دارید؟')" style="margin: 0; display: flex; align-items: center; gap: 8px;">
-                    <input type="hidden" name="action" value="cancel_forward">
-                    <textarea name="notes" rows="1" placeholder="دلیل برگرداندن..." style="width: 160px; padding: 6px 8px; border-radius: 6px; border: 1px solid #fde68a; font-size: 12px; resize: none;"></textarea>
-                    <button type="submit" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap;">
-                        <i class="fas fa-undo-alt"></i> برگرداندن فایل ارسالی
-                    </button>
-                </form>
-            <?php endif; ?>
-            
-            <?php if ($can_return_to_sender): ?>
-                <form method="POST" onsubmit="return confirm('آیا از برگشت این فایل به ارسال‌کننده اطمینان دارید؟')" style="margin: 0;">
-                    <input type="hidden" name="action" value="return_to_sender">
-                    <input type="hidden" name="notes" value="برگشت به ارسال‌کننده">
-                    <button type="submit" style="background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 12px; font-weight: 500;">
-                        <i class="fas fa-reply"></i> برگشت به ارسال‌کننده
-                    </button>
-                </form>
-            <?php endif; ?>
-        </div>
+    
+    <!-- ========== دکمه تأیید نهایی برای ایجادکننده ========== -->
+    <?php if ($can_final_close): ?>
+    <div class="action-form" style="background: #fffbeb;">
+        <h3 style="margin-bottom: 18px; font-size: 16px;"><i class="fas fa-gavel" style="color: var(--accent);"></i> تأیید نهایی و بستن فاکتور</h3>
+        <p style="margin-bottom: 16px; font-size: 13px; color: #92400e;">
+            <i class="fas fa-info-circle"></i> 
+            همه <?php echo $total_approvers; ?> کاربر این فاکتور را تأیید کرده‌اند. 
+            پس از تأیید نهایی، فاکتور بسته می‌شود و هیچ تغییری در آن امکان‌پذیر نیست.
+        </p>
+        <form method="POST" style="text-align: left;">
+            <input type="hidden" name="action" value="final_approve">
+            <button type="submit" class="btn-submit btn-final-custom" onclick="return confirm('آیا از تأیید نهایی و بستن این فاکتور اطمینان دارید؟')">
+                <i class="fas fa-lock"></i> تأیید نهایی و بستن فاکتور
+            </button>
+        </form>
     </div>
     <?php endif; ?>
     
+    <!-- ========== تاریخچه ========== -->
     <div class="info-card">
         <div class="card-header">
             <i class="fas fa-history"></i>
-            <h3>تاریخچه ارجاع</h3>
+            <h3>تاریخچه فاکتور</h3>
         </div>
         <div class="card-body">
             <?php if (empty($history)): ?>
@@ -1049,28 +839,16 @@ ob_start();
                         <tbody>
                             <?php foreach ($history as $h): ?>
                             <tr>
-                                <td style="white-space: nowrap;"><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?></td>
-                                <td><?php echo htmlspecialchars($h['from_name']); ?></td>
-                                <td>
-                                    <?php 
-                                    if ($h['to_name']) {
-                                        echo '👤 ' . htmlspecialchars($h['to_name']);
-                                    } elseif ($h['to_department_name']) {
-                                        echo '🏢 ' . htmlspecialchars($h['to_department_name']);
-                                    } else {
-                                        echo '-';
-                                    }
-                                    ?>
-                                </td>
+                                <td style="white-space: nowrap;"><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?>72
+                                <td><?php echo htmlspecialchars($h['from_name']); ?>72
+                                <td><?php echo htmlspecialchars($h['to_name'] ?? '-'); ?>72
                                 <td>
                                     <?php
-                                    $action_class = '';
                                     $action_icon = '';
-                                    if ($h['action'] == 'forward') { $action_class = 'action-forward'; $action_icon = '🔄'; $action_text = 'ارجاع'; }
-                                    elseif ($h['action'] == 'cancel_forward') { $action_class = 'action-cancel'; $action_icon = '↩️'; $action_text = 'برگشت ارجاع'; }
-                                    elseif ($h['action'] == 'return_to_sender') { $action_class = 'action-return'; $action_icon = '↩️'; $action_text = 'برگشت به ارسال‌کننده'; }
-                                    elseif ($h['action'] == 'approve') { $action_class = 'action-approve'; $action_icon = '✅'; $action_text = 'تایید'; }
-                                    elseif ($h['action'] == 'reject') { $action_class = 'action-reject'; $action_icon = '❌'; $action_text = 'رد'; }
+                                    $action_class = '';
+                                    if ($h['action'] == 'approve') { $action_icon = '✅'; $action_class = 'action-approve'; $action_text = 'تأیید'; }
+                                    elseif ($h['action'] == 'reject') { $action_icon = '❌'; $action_class = 'action-reject'; $action_text = 'رد'; }
+                                    elseif ($h['action'] == 'final_approve') { $action_icon = '🔒'; $action_class = 'action-final'; $action_text = 'تأیید نهایی'; }
                                     else { $action_icon = '📌'; $action_text = $h['action']; }
                                     ?>
                                     <span class="action-badge <?php echo $action_class; ?>">
@@ -1121,52 +899,18 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
 
-function updateCounters() {
-    fetch('/invoice-system-v2/ajax/update_counter.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            type: 'invoice', 
-            mark_as_viewed: true, 
-            doc_id: <?php echo $id; ?> 
-        })
-    })
-    .then(response => response.json())
-    .then(data => {
-        const invoiceBadge = document.getElementById('invoiceBadge');
-        if (invoiceBadge) {
-            if (data.invoice_count > 0) {
-                invoiceBadge.textContent = data.invoice_count;
-                invoiceBadge.style.display = 'inline-block';
-            } else {
-                invoiceBadge.style.display = 'none';
-            }
+// اعتبارسنجی برای دکمه رد
+const rejectBtn = document.getElementById('rejectBtn');
+const commentText = document.getElementById('commentText');
+if (rejectBtn) {
+    rejectBtn.addEventListener('click', function(e) {
+        if (commentText && commentText.value.trim() === '') {
+            e.preventDefault();
+            alert('لطفاً دلیل رد را وارد کنید');
+            return false;
         }
-        const waybillBadge = document.getElementById('waybillBadge');
-        if (waybillBadge) {
-            if (data.waybill_count > 0) {
-                waybillBadge.textContent = data.waybill_count;
-                waybillBadge.style.display = 'inline-block';
-            } else {
-                waybillBadge.style.display = 'none';
-            }
-        }
-        const taxBadge = document.getElementById('taxBadge');
-        if (taxBadge) {
-            if (data.tax_count > 0) {
-                taxBadge.textContent = data.tax_count;
-                taxBadge.style.display = 'inline-block';
-            } else {
-                taxBadge.style.display = 'none';
-            }
-        }
-    })
-    .catch(error => console.error('Error:', error));
+    });
 }
-
-<?php if (($invoice['status'] == 'pending' || $invoice['status'] == 'forwarded') && $is_holder): ?>
-    updateCounters();
-<?php endif; ?>
 </script>
 
 <?php
