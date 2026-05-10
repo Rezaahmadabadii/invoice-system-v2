@@ -108,6 +108,25 @@ foreach ($approvals as $a) {
         break;
     }
 }
+
+// ========== به‌روزرسانی وضعیت viewed در هنگام مشاهده ==========
+if ($user_approval && $user_approval['status'] == 'pending' && !$is_creator && !$is_final_closed) {
+    $update_viewed = $pdo->prepare("UPDATE document_approvals SET status = 'viewed', viewed_at = NOW() WHERE document_id = ? AND user_id = ?");
+    $update_viewed->execute([$id, $user_id]);
+    
+    // به‌روزرسانی متغیر محلی برای نمایش در صفحه
+    $user_approval['status'] = 'viewed';
+    
+    // به‌روزرسانی آرایه approvals
+    foreach ($approvals as &$a) {
+        if ($a['user_id'] == $user_id) {
+            $a['status'] = 'viewed';
+            break;
+        }
+    }
+}
+// ========================================================
+
 $can_approve = ($user_approval && in_array($user_approval['status'], ['pending', 'viewed']) && !$is_creator && !$is_final_closed);
 $can_final_close = ($is_creator && $all_approved && $current_status != 'final_approved' && $current_status != 'rejected');
 $is_draft = ($current_status == 'draft');
@@ -119,16 +138,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     
     // تأیید توسط کاربر دریافت‌کننده
     if ($action == 'approve_invoice' && $can_approve) {
-        // به‌روزرسانی وضعیت در document_approvals
         $update = $pdo->prepare("UPDATE document_approvals SET status = 'approved', action_at = NOW(), comment = ? WHERE document_id = ? AND user_id = ?");
         $update->execute([$comment, $id, $user_id]);
         
-        // به‌روزرسانی آمار در documents
         $new_approved_count = $approved_count + 1;
         $new_status = ($new_approved_count == $total_approvers) ? 'ready_to_close' : 'partially_approved';
         $pdo->prepare("UPDATE documents SET approved_count = ?, status = ? WHERE id = ?")->execute([$new_approved_count, $new_status, $id]);
         
-        // ثبت در تاریخچه
         $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'approve', ?)");
         $history->execute([$id, $user_id, $comment]);
         
@@ -393,7 +409,6 @@ ob_start();
         font-size: 11px;
     }
     
-    /* ========== استایل بخش تأیید کاربران ========== */
     .approval-section {
         margin-bottom: 24px;
     }
@@ -470,7 +485,6 @@ ob_start();
         color: var(--text-muted);
     }
     
-    /* ========== استایل فرم تأیید/رد ========== */
     .action-form {
         background: white;
         border-radius: 20px;
@@ -503,9 +517,8 @@ ob_start();
         background: linear-gradient(135deg, #f59e0b, #d97706);
     }
     
-    /* ========== استایل تاریخچه ========== */
     .history-wrapper {
-        max-height: 250px;
+        max-height: 300px;
         overflow-y: auto;
         border-radius: 12px;
         border: 1px solid var(--border);
@@ -739,7 +752,6 @@ ob_start();
             <h3>وضعیت تأیید کاربران</h3>
         </div>
         <div class="card-body">
-            <!-- نوار پیشرفت -->
             <div class="progress-bar-container">
                 <div class="progress-fill" style="width: <?php echo $total_approvers > 0 ? (($approved_count / $total_approvers) * 100) : 0; ?>%;"></div>
             </div>
@@ -750,7 +762,6 @@ ob_start();
                 <span class="stat-item">👥 کل: <?php echo $total_approvers; ?></span>
             </div>
             
-            <!-- لیست کاربران با وضعیت -->
             <div class="approvers-list">
                 <?php foreach ($approvals as $approver): 
                     $status_info = $status_labels[$approver['status']] ?? ['text' => $approver['status'], 'class' => 'status-pending', 'icon' => '📌'];
@@ -899,7 +910,6 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
 
-// اعتبارسنجی برای دکمه رد
 const rejectBtn = document.getElementById('rejectBtn');
 const commentText = document.getElementById('commentText');
 if (rejectBtn) {

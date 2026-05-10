@@ -91,29 +91,75 @@ $sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
         )
         $date_condition";
 
-// پارامترها: شرط ادمین + ایجادکننده + کاربر در document_approvals
-$params = array_merge([$is_admin_flag, $user_id, $user_id], $params);
+$params_main = array_merge([$is_admin_flag, $user_id, $user_id], $params);
 
 if ($filter_company) {
     $sql .= " AND d.company_id = ?";
-    $params[] = $filter_company;
+    $params_main[] = $filter_company;
 }
 if ($filter_status) {
     $sql .= " AND d.status = ?";
-    $params[] = $filter_status;
+    $params_main[] = $filter_status;
 }
 if ($search) {
     $sql .= " AND (d.document_number LIKE ? OR d.title LIKE ? OR c.name LIKE ? OR v.name LIKE ?)";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+    $params_main[] = "%$search%";
+    $params_main[] = "%$search%";
+    $params_main[] = "%$search%";
+    $params_main[] = "%$search%";
 }
 
 $sql .= " ORDER BY d.created_at DESC";
 $stmt = $pdo->prepare($sql);
-$stmt->execute($params);
+$stmt->execute($params_main);
 $invoices = $stmt->fetchAll();
+
+// ========== تاریخچه (۳ رکورد آخر هماهنگ با فیلترها) ==========
+$history_sql = "SELECT 
+                   fh.*,
+                   u_from.full_name as from_name,
+                   u_to.full_name as to_name,
+                   d.document_number,
+                   d.title as invoice_title
+                FROM forwarding_history fh
+                JOIN documents d ON fh.document_id = d.id
+                LEFT JOIN users u_from ON fh.from_user_id = u_from.id
+                LEFT JOIN users u_to ON fh.to_user_id = u_to.id
+                WHERE d.type = 'invoice'
+                AND (
+                    ? = 'admin'
+                    OR d.created_by = ? 
+                    OR EXISTS (
+                        SELECT 1 FROM document_approvals da 
+                        WHERE da.document_id = d.id AND da.user_id = ?
+                    )
+                )";
+
+$history_params = [$is_admin_flag, $user_id, $user_id];
+
+if ($filter_company) {
+    $history_sql .= " AND d.company_id = ?";
+    $history_params[] = $filter_company;
+}
+if ($filter_status) {
+    $history_sql .= " AND d.status = ?";
+    $history_params[] = $filter_status;
+}
+if ($search) {
+    $history_sql .= " AND (d.document_number LIKE ? OR d.title LIKE ?)";
+    $history_params[] = "%$search%";
+    $history_params[] = "%$search%";
+}
+if ($selected_year && $selected_month) {
+    $history_sql .= " $date_condition";
+    $history_params = array_merge($history_params, [$start_date_greg, $end_date_greg]);
+}
+
+$history_sql .= " ORDER BY fh.created_at DESC LIMIT 3";
+
+$history_stmt = $pdo->prepare($history_sql);
+$history_stmt->execute($history_params);
+$recent_history = $history_stmt->fetchAll();
 
 // آمار
 $total_invoices = count($invoices);
@@ -226,9 +272,10 @@ ob_start();
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
         gap: 16px;
-        max-height: 70vh;
+        max-height: 60vh;
         overflow-y: auto;
         padding: 4px;
+        margin-bottom: 24px;
     }
     
     .invoice-card {
@@ -328,7 +375,6 @@ ob_start();
         font-size: 13px;
     }
     
-    /* ========== بخش پیشرفت تأیید روی کارت ========== */
     .approval-progress-mini {
         margin: 10px 0;
         padding: 8px;
@@ -353,7 +399,6 @@ ob_start();
         color: #64748b;
         text-align: center;
     }
-    /* ===================================== */
     
     .holder-box {
         background: #f0f7ff;
@@ -395,15 +440,6 @@ ob_start();
     .action-btn.file { background: #f8f9fa; border: 1px solid #e2e8f0; }
     .action-btn.file:hover { background: #e2e8f0; transform: translateY(-1px); }
     
-    .action-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 2px 8px;
-        border-radius: 20px;
-        font-size: 10px;
-    }
-    
     .empty-state {
         text-align: center;
         padding: 40px;
@@ -428,19 +464,318 @@ ob_start();
         font-size: 13px;
     }
     
+    /* ========== تاریخچه فشرده در فوتر ========== */
+    .history-footer {
+        margin-top: 20px;
+        background: white;
+        border-radius: 14px;
+        border: 1px solid #e2e8f0;
+        overflow: hidden;
+    }
+    
+    .history-footer-title {
+        padding: 6px 14px;
+        background: #f8fafc;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #0f172a;
+    }
+    
+    .history-footer-title i {
+        color: #3b82f6;
+        font-size: 13px;
+    }
+    
+    .history-footer-scroll {
+        max-height: 130px;
+        overflow-y: auto;
+    }
+    
+    .history-footer-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 10px;
+    }
+    
+    .history-footer-table th {
+        padding: 8px 10px;
+        text-align: center;
+        background: #ffffff;
+        color: #64748b;
+        font-weight: 600;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid #e2e8f0;
+        position: sticky;
+        top: 0;
+        background: white;
+        z-index: 1;
+    }
+    
+    .history-footer-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid #f1f5f9;
+        vertical-align: middle;
+    }
+    
+    .history-footer-table tbody tr:hover {
+        background: #f8fafc;
+    }
+    
+    /* خطوط جداکننده عمودی بین ستون‌ها */
+    .history-footer-table th:not(:first-child),
+    .history-footer-table td:not(:first-child) {
+        border-left: 1px solid #e2e8f0;
+    }
+    
+    .history-time {
+        font-family: monospace;
+        font-size: 9px;
+        color: #475569;
+        white-space: nowrap;
+        text-align: center;
+    }
+    
+    .history-creator {
+        font-size: 10px;
+        color: #1e293b;
+        white-space: nowrap;
+        text-align: center;
+    }
+    
+    .history-doc-num {
+        font-family: monospace;
+        font-size: 9px;
+        color: #475569;
+        text-align: center;
+        direction: ltr;
+    }
+    
+    .history-status {
+        text-align: center;
+    }
+    
+    .history-duration {
+        font-family: monospace;
+        font-size: 9px;
+        color: #475569;
+        text-align: center;
+        white-space: nowrap;
+    }
+    
+    .status-badge-footer {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-size: 9px;
+        font-weight: 500;
+        white-space: nowrap;
+    }
+    
+    .status-badge-footer.status-approved {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    
+    .status-badge-footer.status-rejected {
+        background: #fee2e2;
+        color: #b91c1c;
+    }
+    
+    .status-badge-footer.status-closed {
+        background: #fef3c7;
+        color: #b45309;
+    }
+    
+    .status-badge-footer.status-pending {
+        background: #dbeafe;
+        color: #1d4ed8;
+    }
+    
+    .status-badge-footer.status-other {
+        background: #f1f5f9;
+        color: #475569;
+    }
+    
+    .text-center {
+        text-align: center;
+    }
+    
+    /* ========== مودال فایل ========== */
+    .file-modal {
+        display: none;
+        position: fixed;
+        z-index: 9999;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.85);
+        backdrop-filter: blur(5px);
+    }
+    
+    .file-modal-content {
+        position: relative;
+        background-color: #fff;
+        margin: 3% auto;
+        padding: 0;
+        width: 90%;
+        max-width: 1000px;
+        border-radius: 16px;
+        box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+        animation: modalFadeIn 0.3s ease-out;
+        overflow: hidden;
+    }
+    
+    @keyframes modalFadeIn {
+        from { opacity: 0; transform: scale(0.95); }
+        to { opacity: 1; transform: scale(1); }
+    }
+    
+    .file-modal-close {
+        position: absolute;
+        top: 12px;
+        right: 20px;
+        color: #fff;
+        font-size: 32px;
+        font-weight: bold;
+        cursor: pointer;
+        z-index: 10;
+        background: rgba(0,0,0,0.5);
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+    }
+    
+    .file-modal-close:hover {
+        background: #e74c3c;
+        transform: rotate(90deg);
+    }
+    
+    .file-modal-body {
+        padding: 20px;
+        background: #f1f5f9;
+        min-height: 400px;
+        max-height: 85vh;
+        overflow-y: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    
+    .file-modal-body img {
+        max-width: 100%;
+        max-height: 75vh;
+        object-fit: contain;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    
+    .file-modal-body iframe {
+        width: 100%;
+        height: 75vh;
+        border: none;
+        border-radius: 8px;
+    }
+    
+    .file-loading {
+        text-align: center;
+        padding: 40px;
+        color: #64748b;
+        font-size: 14px;
+    }
+    
+    .file-loading:after {
+        content: '';
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        margin-right: 10px;
+        border: 2px solid #3b82f6;
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        vertical-align: middle;
+    }
+    
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+    
+    /* ========== ریسپانسیو ========== */
     @media (max-width: 768px) {
-        .cards-list { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); max-height: 60vh; }
-        .stats-grid { grid-template-columns: repeat(2, 1fr); }
-        .filters-container { flex-direction: column; align-items: stretch; }
-        .filters-container > * { width: 100%; }
-        .cart-animation-area { min-height: 100px; }
-        .cart-icon { font-size: 60px; }
-        .cart-slide-right { transform: translateX(200px); opacity: 0; }
+        .cards-list {
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            max-height: 50vh;
+        }
+        .stats-grid {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        .filters-container {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .filters-container > * {
+            width: 100%;
+        }
+        .cart-animation-area {
+            min-height: 100px;
+        }
+        .cart-icon {
+            font-size: 60px;
+        }
+        .cart-slide-right {
+            transform: translateX(200px);
+            opacity: 0;
+        }
+        .history-time {
+            font-size: 8px;
+        }
+        .history-creator {
+            font-size: 9px;
+        }
+        .history-doc-num {
+            font-size: 8px;
+        }
+        .history-duration {
+            font-size: 8px;
+        }
+        .status-badge-footer {
+            font-size: 8px;
+            padding: 2px 6px;
+        }
+        .file-modal-content {
+            width: 95%;
+            margin: 10% auto;
+        }
+        .file-modal-body {
+            padding: 12px;
+        }
+        .file-modal-body img,
+        .file-modal-body iframe {
+            max-height: 60vh;
+        }
     }
     
     @media (max-width: 480px) {
-        .cards-list { grid-template-columns: 1fr; }
-        .cart-slide-right { transform: translateX(100px); opacity: 0; }
+        .cards-list {
+            grid-template-columns: 1fr;
+        }
+        .cart-slide-right {
+            transform: translateX(100px);
+            opacity: 0;
+        }
     }
 </style>
 
@@ -505,6 +840,7 @@ ob_start();
     <a href="inbox.php" class="filter-btn reset">پاک کردن</a>
 </div>
 
+<!-- ========== لیست کارت‌های فاکتور ========== -->
 <div class="cards-list">
     <?php if (empty($invoices)): ?>
         <div class="empty-state"><i class="fas fa-file-invoice" style="font-size: 40px;"></i><p>هیچ فاکتوری یافت نشد</p></div>
@@ -516,7 +852,6 @@ ob_start();
             $approved_count = $inv['approved_count'] ?? 0;
             $progress_percent = $total_approvers > 0 ? round(($approved_count / $total_approvers) * 100) : 0;
             
-            // بررسی آیا کاربر باید تأیید کند
             $needs_approval = false;
             if (!$isDraft && !in_array($inv['status'], ['final_approved', 'rejected'])) {
                 $check_stmt = $pdo->prepare("SELECT status FROM document_approvals WHERE document_id = ? AND user_id = ?");
@@ -556,7 +891,6 @@ ob_start();
                     <span class="info-value"><?php echo $shamsi_date; ?></span>
                 </div>
                 
-                <!-- نوار پیشرفت تأیید (برای فاکتورهای در جریان) -->
                 <?php if ($total_approvers > 0 && !in_array($inv['status'], ['final_approved', 'rejected', 'draft'])): ?>
                 <div class="approval-progress-mini">
                     <div class="progress-mini-bar">
@@ -622,6 +956,100 @@ ob_start();
         </div>
         <?php endforeach; ?>
     <?php endif; ?>
+</div>
+
+<!-- ========== تاریخچه فشرده در فوتر ========== -->
+<div class="history-footer">
+    <div class="history-footer-title">
+        <i class="fas fa-history"></i>
+        <span>تاریخچه</span>
+    </div>
+    <div class="history-footer-scroll">
+        <table class="history-footer-table">
+            <thead>
+                <tr>
+                    <th>زمان</th>
+                    <th>ایجادکننده</th>
+                    <th>شماره فاکتور</th>
+                    <th>وضعیت</th>
+                    <th>مدت پیگیری</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($recent_history)): ?>
+                    <tr>
+                        <td colspan="5" class="text-center">هیچ فعالیتی یافت نشد</td>
+                    </tr>
+                <?php else: ?>
+                    <?php 
+                    $history_count = 0;
+                    foreach ($recent_history as $h): 
+                        if ($history_count >= 2) break;
+                        $history_count++;
+                        $full_date = jdate('Y/m-d H:i', strtotime($h['created_at']));
+                        
+                        $doc_stmt = $pdo->prepare("SELECT created_at FROM documents WHERE id = ?");
+                        $doc_stmt->execute([$h['document_id']]);
+                        $doc_created_at = $doc_stmt->fetchColumn();
+                        $start_time = strtotime($doc_created_at);
+                        $end_time = strtotime($h['created_at']);
+                        $diff_seconds = $end_time - $start_time;
+                        
+                        if ($diff_seconds < 3600) {
+                            $minutes = floor($diff_seconds / 60);
+                            $duration = $minutes . ' دقیقه';
+                        } elseif ($diff_seconds < 86400) {
+                            $hours = floor($diff_seconds / 3600);
+                            $remain_minutes = floor(($diff_seconds % 3600) / 60);
+                            $duration = $hours . ' ساعت ' . ($remain_minutes > 0 ? $remain_minutes . ' دقیقه' : '');
+                        } else {
+                            $days = floor($diff_seconds / 86400);
+                            $remain_hours = floor(($diff_seconds % 86400) / 3600);
+                            $duration = $days . ' روز ' . ($remain_hours > 0 ? $remain_hours . ' ساعت' : '');
+                        }
+                        
+                        $status_class = '';
+                        $status_text = '';
+                        $status_icon = '';
+                        
+                        if ($h['action'] == 'approve') {
+                            $status_class = 'status-approved';
+                            $status_text = 'تأیید شده';
+                            $status_icon = '✅';
+                        } elseif ($h['action'] == 'reject') {
+                            $status_class = 'status-rejected';
+                            $status_text = 'رد شده';
+                            $status_icon = '❌';
+                        } elseif ($h['action'] == 'final_approve') {
+                            $status_class = 'status-closed';
+                            $status_text = 'بسته شده';
+                            $status_icon = '🔒';
+                        } elseif ($h['action'] == 'forward') {
+                            $status_class = 'status-pending';
+                            $status_text = 'در جریان';
+                            $status_icon = '🔄';
+                        } else {
+                            $status_class = 'status-other';
+                            $status_text = 'ثبت شد';
+                            $status_icon = '📌';
+                        }
+                    ?>
+                    <tr>
+                        <td class="history-time"><?php echo $full_date; ?></td>
+                        <td class="history-creator"><?php echo htmlspecialchars($h['from_name']); ?></td>
+                        <td class="history-doc-num"><?php echo htmlspecialchars($h['document_number']); ?></td>
+                        <td class="history-status">
+                            <span class="status-badge-footer <?php echo $status_class; ?>">
+                                <?php echo $status_icon . ' ' . $status_text; ?>
+                            </span>
+                        </td>
+                        <td class="history-duration"><?php echo $duration; ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <script>
@@ -728,7 +1156,7 @@ document.addEventListener('keydown', function(e) {
 });
 </script>
 
-<!-- مودال نمایش فایل -->
+<!-- ========== مودال نمایش فایل ========== -->
 <div id="fileModal" class="file-modal" onclick="closeFileModal(event)">
     <div class="file-modal-content" onclick="event.stopPropagation()">
         <span class="file-modal-close" onclick="closeFileModal()">&times;</span>
@@ -739,6 +1167,7 @@ document.addEventListener('keydown', function(e) {
 </div>
 
 <style>
+    /* استایل‌های مودال (همون استایل‌هایی که قبلاً دادی) */
     .file-modal {
         display: none;
         position: fixed;
