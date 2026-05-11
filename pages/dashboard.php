@@ -104,10 +104,6 @@ ob_start();
 
 <style>
     /* ========== استایل اختصاصی داشبورد ========== */
-    .dashboard-content {
-        max-width: 1400px;
-        margin: 0 auto;
-    }
     
     .welcome-header {
         margin-bottom: 28px;
@@ -454,7 +450,6 @@ ob_start();
     }
 </style>
 
-<div class="dashboard-content">
     <!-- هدر خوش‌آمدگویی -->
     <div class="welcome-header">
         <h1>👋 خوش آمدید، <?php echo htmlspecialchars($full_name); ?></h1>

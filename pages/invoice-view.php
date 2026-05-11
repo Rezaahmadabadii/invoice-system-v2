@@ -220,13 +220,7 @@ ob_start();
         --text-main: #0f172a;
         --text-muted: #64748b;
     }
-    
-    .view-wrapper {
-        max-width: 1400px;
-        margin: 0 auto;
-        padding: 20px 24px;
-    }
-    
+        
     .page-header {
         display: flex;
         justify-content: space-between;
@@ -613,9 +607,10 @@ ob_start();
             padding: 16px;
         }
     }
+	
 </style>
 
-<div class="view-wrapper">
+
     <div class="page-header">
         <h1 class="page-title"><i class="fas fa-file-invoice"></i> مشاهده فاکتور</h1>
         <div style="display: flex; gap: 12px;">
@@ -877,7 +872,6 @@ ob_start();
             <?php endif; ?>
         </div>
     </div>
-</div>
 
 <div id="fileModal" class="modal" onclick="closeModal()">
     <span class="close-modal" onclick="closeModal()">&times;</span>
