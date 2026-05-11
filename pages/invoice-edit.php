@@ -52,9 +52,22 @@ if ($invoice['created_by'] != $_SESSION['user_id']) {
 $current_status = $invoice['status'];
 $is_draft = ($current_status == 'draft');
 
-// اگر فاکتور پیش‌نویس نیست، اجازه ویرایش ندارد (فقط مشاهده)
-if (!$is_draft) {
-    $_SESSION['error'] = 'فقط فاکتورهای پیش‌نویس قابل ویرایش هستند.';
+// بررسی آیا کاربری قبلاً تأیید یا رد کرده است
+$has_any_action = false;
+if (!$is_draft && $current_status != 'rejected' && $current_status != 'final_approved') {
+    $check_action = $pdo->prepare("
+        SELECT COUNT(*) FROM document_approvals 
+        WHERE document_id = ? AND status IN ('approved', 'rejected')
+    ");
+    $check_action->execute([$id]);
+    $has_any_action = $check_action->fetchColumn() > 0;
+}
+
+// شرط ویرایش: پیش‌نویس باشد OR (هنوز کسی اقدامی نکرده باشد)
+$can_edit = ($is_draft || (!$has_any_action && $current_status != 'final_approved' && $current_status != 'rejected'));
+
+if (!$can_edit) {
+    $_SESSION['error'] = 'این فاکتور به دلیل انجام اقدام (تأیید یا رد) توسط کاربران، قابل ویرایش نیست.';
     header('Location: invoice-view.php?id=' . $id);
     exit;
 }

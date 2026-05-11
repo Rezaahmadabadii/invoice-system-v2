@@ -184,15 +184,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     }
 }
 
-// ========== دریافت تاریخچه ==========
 $history_stmt = $pdo->prepare("
     SELECT fh.*, 
            u_from.full_name as from_name,
-           u_to.full_name as to_name
+           u_to.full_name as to_name,
+           r_to.name as to_department_name
     FROM forwarding_history fh
     LEFT JOIN users u_from ON fh.from_user_id = u_from.id
     LEFT JOIN users u_to ON fh.to_user_id = u_to.id
+    LEFT JOIN roles r_to ON fh.to_department_id = r_to.id
     WHERE fh.document_id = ?
+    GROUP BY fh.id
     ORDER BY fh.created_at ASC
 ");
 $history_stmt->execute([$id]);
@@ -850,9 +852,9 @@ ob_start();
                         <tbody>
                             <?php foreach ($history as $h): ?>
                             <tr>
-                                <td style="white-space: nowrap;"><?php echo jdate('Y/m/d H:i', strtotime($h['created_at'])); ?>72
-                                <td><?php echo htmlspecialchars($h['from_name']); ?>72
-                                <td><?php echo htmlspecialchars($h['to_name'] ?? '-'); ?>72
+                                <td style="white-space: nowrap;"><?php echo jdate('Y/m-d', strtotime($h['created_at'])); ?></td>
+                                <td><?php echo htmlspecialchars(trim($h['from_name'] ?? '-')); ?></td>
+                                <td><?php echo htmlspecialchars(trim($h['to_name'] ?? ($h['to_department_name'] ?? '-'))); ?></td>
                                 <td>
                                     <?php
                                     $action_icon = '';
@@ -883,6 +885,52 @@ ob_start();
 </div>
 
 <script>
+// ========== به‌روزرسانی شمارنده منو ==========
+function updateCounters() {
+    fetch('/invoice-system-v2/ajax/update_counter.php')
+        .then(response => response.json())
+        .then(data => {
+            const invoiceBadge = document.getElementById('invoiceBadge');
+            if (invoiceBadge) {
+                const count = data.invoice_count || 0;
+                invoiceBadge.textContent = count;
+                invoiceBadge.style.display = count > 0 ? 'inline-block' : 'none';
+            }
+        })
+        .catch(error => console.error('خطا:', error));
+}
+
+// ========== بررسی تغییر وضعیت فاکتور ==========
+let lastStatus = document.querySelector('.status-badge')?.innerHTML;
+let lastAction = document.querySelector('.action-form')?.innerHTML;
+
+setInterval(() => {
+    fetch(window.location.href)
+        .then(response => response.text())
+        .then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            
+            const newStatus = doc.querySelector('.status-badge')?.innerHTML;
+            const newAction = doc.querySelector('.action-form')?.innerHTML;
+            
+            // اگر وضعیت یا فرم اقدامات تغییر کرده بود، صفحه را رفرش کن
+            if ((newStatus && lastStatus && newStatus !== lastStatus) ||
+                (newAction && lastAction && newAction !== lastAction)) {
+                window.location.reload();
+            }
+            
+            // به‌روزرسانی متغیرها
+            lastStatus = newStatus;
+            lastAction = newAction;
+        })
+        .catch(error => console.error('خطا:', error));
+    
+    // هربار شمارنده را هم به‌روز کن
+    updateCounters();
+}, 3000);
+
+// ========== توابع مودال ==========
 function openModal(fileUrl, type) {
     const modal = document.getElementById('fileModal');
     const modalContent = document.getElementById('modalContent');
@@ -910,6 +958,7 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeModal();
 });
 
+// ========== اعتبارسنجی دکمه رد ==========
 const rejectBtn = document.getElementById('rejectBtn');
 const commentText = document.getElementById('commentText');
 if (rejectBtn) {
@@ -921,8 +970,10 @@ if (rejectBtn) {
         }
     });
 }
-</script>
 
+// ========== اجرای اولیه ==========
+updateCounters();
+</script>
 <?php
 $content = ob_get_clean();
 require_once __DIR__ . '/../templates/layouts/dashboard.php';

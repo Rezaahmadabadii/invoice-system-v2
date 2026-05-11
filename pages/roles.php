@@ -28,26 +28,35 @@ $filter_type = $_GET['filter_type'] ?? 'all';
 $message = '';
 $error = '';
 
-// افزودن نقش جدید
+// ========== افزودن نقش جدید ==========
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_role'])) {
     $name = trim($_POST['name'] ?? '');
     $description = trim($_POST['description'] ?? '');
-    $role_type = $_POST['role_type'] ?? 'normal'; // department, normal
-    
+    $role_type = $_POST['role_type'] ?? 'normal';
     $is_department = ($role_type == 'department') ? 1 : 0;
     
     if (!empty($name)) {
-        $stmt = $pdo->prepare("INSERT INTO roles (name, description, is_department, created_at) VALUES (?, ?, ?, NOW())");
-        if ($stmt->execute([$name, $description, $is_department])) {
-            $message = 'نقش جدید با موفقیت اضافه شد';
-            logActivity($_SESSION['user_id'], 'add_role', "نقش جدید اضافه شد: $name");
+        $check = $pdo->prepare("SELECT COUNT(*) FROM roles WHERE name = ?");
+        $check->execute([$name]);
+        $exists = $check->fetchColumn();
+        
+        if ($exists > 0) {
+            $error = 'نقشی با این نام قبلاً ثبت شده است';
         } else {
-            $error = 'خطا در افزودن نقش';
+            $stmt = $pdo->prepare("INSERT INTO roles (name, description, is_department, created_at) VALUES (?, ?, ?, NOW())");
+            if ($stmt->execute([$name, $description, $is_department])) {
+                $message = 'نقش جدید با موفقیت اضافه شد';
+                logActivity($_SESSION['user_id'], 'add_role', "نقش جدید اضافه شد: $name");
+            } else {
+                $error = 'خطا در افزودن نقش';
+            }
         }
+    } else {
+        $error = 'لطفاً نام نقش را وارد کنید';
     }
 }
 
-// ویرایش نقش
+// ========== ویرایش نقش ==========
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_role'])) {
     $id = $_POST['role_id'];
     $name = trim($_POST['name'] ?? '');
@@ -59,7 +68,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_role'])) {
     $check->execute([$id]);
     $role = $check->fetch();
     
-    if ($role && $role['name'] == 'super_admin') {
+    if ($role === false) {
+        $error = 'نقش مورد نظر یافت نشد';
+    } elseif ($role['name'] == 'super_admin') {
         $error = 'نقش super_admin قابل ویرایش نیست';
     } elseif (!empty($name)) {
         $stmt = $pdo->prepare("UPDATE roles SET name = ?, description = ?, is_department = ? WHERE id = ?");
@@ -73,17 +84,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_role'])) {
 }
 
 // حذف نقش
-if (isset($_GET['delete']) && isSuperAdmin()) {
-    $id = $_GET['delete'];
+if (isset($_GET['delete']) && is_numeric($_GET['delete']) && isSuperAdmin()) {
+    $id = (int)$_GET['delete'];
     
+    // بررسی وجود نقش
     $check = $pdo->prepare("SELECT name FROM roles WHERE id = ?");
     $check->execute([$id]);
     $role = $check->fetch();
     
-    if ($role && $role['name'] == 'super_admin') {
+    if ($role === false) {
+        $error = 'نقش مورد نظر یافت نشد';
+    } elseif ($role['name'] == 'super_admin') {
         $error = 'نمی‌توان نقش super_admin را حذف کرد';
     } else {
-        $userCheck = $pdo->prepare("SELECT COUNT(*) FROM users WHERE department_id = ?");
+        $userCheck = $pdo->prepare("SELECT COUNT(*) FROM user_roles WHERE role_id = ?");
         $userCheck->execute([$id]);
         $userCount = $userCheck->fetchColumn();
         
@@ -93,7 +107,12 @@ if (isset($_GET['delete']) && isSuperAdmin()) {
             $stmt = $pdo->prepare("DELETE FROM roles WHERE id = ?");
             if ($stmt->execute([$id])) {
                 $message = 'نقش با موفقیت حذف شد';
-                logActivity($_SESSION['user_id'], 'delete_role', "نقش حذف شد: " . $role['name']);
+                if ($role !== false) {
+                    logActivity($_SESSION['user_id'], 'delete_role', "نقش حذف شد: " . $role['name']);
+                }
+                // ریدایرکت برای حذف پارامتر delete از URL
+                header('Location: roles.php?filter_type=' . $filter_type);
+                exit;
             } else {
                 $error = 'خطا در حذف نقش';
             }
@@ -158,7 +177,6 @@ ob_start();
         transition: all 0.3s ease;
         filter: drop-shadow(0 2px 5px rgba(0,0,0,0.1));
     }
-    /* انیمیشن‌های اسمایل - حرکت به چپ و برگشت */
     @keyframes smiley-slide-left {
         0% { transform: translateX(0) rotate(0deg); opacity: 1; }
         30% { transform: translateX(-80px) rotate(-15deg); opacity: 0.8; }
@@ -512,7 +530,6 @@ function toggleEditForm(id) {
     form.classList.toggle('show');
 }
 
-// انیمیشن‌های اسمایل (حرکت به چپ و برگشت)
 const smiley = document.getElementById('smileyEmoji');
 const animations = ['smiley-slide-left', 'smiley-slide-left-fade', 'smiley-wiggle', 'smiley-spin-left', 'smiley-bounce-left'];
 
@@ -525,7 +542,6 @@ function playRandomAnimation() {
     }, 1500);
 }
 
-// اجرای هر 4 تا 8 ثانیه
 setInterval(() => {
     playRandomAnimation();
 }, 5000 + Math.random() * 4000);
