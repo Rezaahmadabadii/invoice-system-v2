@@ -298,43 +298,100 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         }
     }
     
-    // ========== افزودن کامنت جدید ==========
-    elseif ($action == 'add_comment' && isset($_POST['submit_comment'])) {
-        $comment_text = trim($_POST['comment_text'] ?? '');
-        if (!empty($comment_text)) {
-            $insert = $pdo->prepare("INSERT INTO document_comments (document_id, user_id, comment) VALUES (?, ?, ?)");
-            $insert->execute([$id, $user_id, $comment_text]);
-            
-            $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'add_comment', ?)");
-            $history->execute([$id, $user_id, 'یادداشت اضافه شد: ' . mb_substr($comment_text, 0, 100)]);
-            
-            $success = 'یادداشت با موفقیت ثبت شد.';
-            echo '<script>setTimeout(function() { window.location.reload(); }, 1000);</script>';
-        } else {
-            $error = 'لطفاً متن یادداشت را وارد کنید.';
-        }
+// ========== افزودن کامنت جدید (AJAX) ==========
+elseif ($action == 'add_comment' && isset($_POST['submit_comment'])) {
+    $comment_text = trim($_POST['comment_text'] ?? '');
+    if (!empty($comment_text)) {
+        $insert = $pdo->prepare("INSERT INTO document_comments (document_id, user_id, comment) VALUES (?, ?, ?)");
+        $insert->execute([$id, $user_id, $comment_text]);
+        
+        $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'add_comment', ?)");
+        $history->execute([$id, $user_id, 'یادداشت اضافه شد: ' . mb_substr($comment_text, 0, 100)]);
+        
+        // برگرداندن محتوای جدید بخش کامنت‌ها
+        $comments_stmt = $pdo->prepare("SELECT dc.*, u.full_name FROM document_comments dc JOIN users u ON dc.user_id = u.id WHERE dc.document_id = ? ORDER BY dc.created_at DESC");
+        $comments_stmt->execute([$id]);
+        $new_comments = $comments_stmt->fetchAll();
+        
+        ob_start();
+        if (!empty($new_comments)): ?>
+            <div style="border-top: 1px solid var(--border); padding-top: 15px; margin-top: 10px;">
+                <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-muted);"><i class="fas fa-list"></i> یادداشت‌های ثبت شده</h4>
+                <?php foreach ($new_comments as $comment): ?>
+                    <div class="comment-item" data-comment-id="<?php echo $comment['id']; ?>" style="background: #f8fafc; border-radius: 12px; padding: 10px 15px; margin-bottom: 10px; position: relative;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                            <div>
+                                <strong style="font-size: 12px;"><?php echo htmlspecialchars($comment['full_name']); ?></strong>
+                                <span style="font-size: 10px; color: #94a3b8; margin-right: 10px;"><?php echo jdate('Y/m/d', strtotime($comment['created_at'])); ?></span>
+                            </div>
+                            <?php if ($is_admin || $comment['user_id'] == $user_id): ?>
+                                <button type="button" class="delete-comment-btn" data-comment-id="<?php echo $comment['id']; ?>" style="background: none; border: none; cursor: pointer; color: #ef4444; font-size: 14px;" title="حذف">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            <?php endif; ?>
+                        </div>
+                        <p style="font-size: 12px; margin-top: 8px; margin-bottom: 0; color: var(--text-main);"><?php echo nl2br(htmlspecialchars($comment['comment'])); ?></p>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif;
+        $html = ob_get_clean();
+        echo $html;
+        exit;
+    } else {
+        echo '<div class="alert alert-danger">لطفاً متن یادداشت را وارد کنید.</div>';
+        exit;
     }
-    
-    // ========== حذف کامنت ==========
-    elseif ($action == 'delete_comment') {
-        $comment_id = (int)($_POST['comment_id'] ?? 0);
-        if ($comment_id > 0) {
-            $check = $pdo->prepare("SELECT user_id FROM document_comments WHERE id = ? AND document_id = ?");
-            $check->execute([$comment_id, $id]);
-            $comment_owner = $check->fetchColumn();
+}
+
+// ========== حذف کامنت (AJAX) ==========
+elseif ($action == 'delete_comment') {
+    $comment_id = (int)($_POST['comment_id'] ?? 0);
+    if ($comment_id > 0) {
+        $check = $pdo->prepare("SELECT user_id FROM document_comments WHERE id = ? AND document_id = ?");
+        $check->execute([$comment_id, $id]);
+        $comment_owner = $check->fetchColumn();
+        
+        if ($is_admin || $comment_owner == $user_id) {
+            $delete = $pdo->prepare("DELETE FROM document_comments WHERE id = ?");
+            $delete->execute([$comment_id]);
             
-            if ($is_admin || $comment_owner == $user_id) {
-                $delete = $pdo->prepare("DELETE FROM document_comments WHERE id = ?");
-                $delete->execute([$comment_id]);
-                
-                $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'delete_comment', ?)");
-                $history->execute([$id, $user_id, 'یادداشت حذف شد']);
-                
-                $success = 'یادداشت با موفقیت حذف شد.';
-                echo '<script>setTimeout(function() { window.location.reload(); }, 1000);</script>';
-            } else {
-                $error = 'شما مجاز به حذف این یادداشت نیستید.';
-            }
+            $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'delete_comment', ?)");
+            $history->execute([$id, $user_id, 'یادداشت حذف شد']);
+            
+            // برگرداندن محتوای جدید بخش کامنت‌ها
+            $comments_stmt = $pdo->prepare("SELECT dc.*, u.full_name FROM document_comments dc JOIN users u ON dc.user_id = u.id WHERE dc.document_id = ? ORDER BY dc.created_at DESC");
+            $comments_stmt->execute([$id]);
+            $new_comments = $comments_stmt->fetchAll();
+            
+            ob_start();
+            if (!empty($new_comments)): ?>
+                <div style="border-top: 1px solid var(--border); padding-top: 15px; margin-top: 10px;">
+                    <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-muted);"><i class="fas fa-list"></i> یادداشت‌های ثبت شده</h4>
+                    <?php foreach ($new_comments as $comment): ?>
+                        <div class="comment-item" data-comment-id="<?php echo $comment['id']; ?>" style="background: #f8fafc; border-radius: 12px; padding: 10px 15px; margin-bottom: 10px; position: relative;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                                <div>
+                                    <strong style="font-size: 12px;"><?php echo htmlspecialchars($comment['full_name']); ?></strong>
+                                    <span style="font-size: 10px; color: #94a3b8; margin-right: 10px;"><?php echo jdate('Y/m/d', strtotime($comment['created_at'])); ?></span>
+                                </div>
+                                <?php if ($is_admin || $comment['user_id'] == $user_id): ?>
+                                    <button type="button" class="delete-comment-btn" data-comment-id="<?php echo $comment['id']; ?>" style="background: none; border: none; cursor: pointer; color: #ef4444; font-size: 14px;" title="حذف">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                <?php endif; ?>
+                            </div>
+                            <p style="font-size: 12px; margin-top: 8px; margin-bottom: 0; color: var(--text-main);"><?php echo nl2br(htmlspecialchars($comment['comment'])); ?></p>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif;
+            $html = ob_get_clean();
+            echo $html;
+            exit;
+        } else {
+            echo '<div class="alert alert-danger">شما مجاز به حذف این یادداشت نیستید.</div>';
+            exit;
         }
     }
 }
@@ -1024,7 +1081,7 @@ ob_start();
             <?php if ($invoice['financial_delivered_at']): ?>
             <div class="info-row" style="background: #e8f5e9; margin-top: 10px; padding: 8px; border-radius: 8px;">
                 <span class="info-label" style="color: #2e7d32;">🚚 تاریخ تحویل به مالی</span>
-                <span class="info-value" style="color: #2e7d32; font-weight: bold;"><?php echo jdate('Y/m-d', strtotime($invoice['financial_delivered_at'])); ?></span>
+                <span class="info-value" style="color: #2e7d32; font-weight: bold;"><?php echo jdate('Y/m/d', strtotime($invoice['financial_delivered_at'])); ?></span>
             </div>
             <?php endif; ?>
             <?php if ($invoice['description']): ?>
@@ -1148,7 +1205,7 @@ ob_start();
                     <?php endif; ?>
                 </div>
                 <?php if ($approver['action_at']): ?>
-                    <div class="approver-time"><?php echo jdate('H:i Y/m/d', strtotime($approver['action_at'])); ?></div>
+                    <div class="approver-time"><?php echo jdate('Y/m/d', strtotime($approver['action_at'])); ?></div>
                 <?php endif; ?>
             </div>
             <?php endforeach; ?>
@@ -1158,17 +1215,17 @@ ob_start();
 <?php endif; ?>
 
 <!-- ========== بخش کامنت/یادداشت (توضیحات اضافی) ========== -->
-<div class="info-card" style="margin-bottom: 24px;">
+<div class="info-card" style="margin-bottom: 24px;" id="commentsSection">
     <div class="card-header">
         <i class="fas fa-pen-alt"></i>
         <h3>توضیحات اضافی</h3>
     </div>
     <div class="card-body">
-        <!-- فرم ثبت کامنت جدید -->
-        <form method="POST" style="margin-bottom: 20px;">
+        <!-- فرم ثبت کامنت جدید با AJAX -->
+        <form method="POST" id="commentForm" style="margin-bottom: 20px;">
             <input type="hidden" name="action" value="add_comment">
             <div class="form-group" style="margin-bottom: 12px;">
-                <textarea name="comment_text" rows="2" placeholder="توضیحات اضافی خود را وارد کنید..." style="width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--border); resize: vertical;"></textarea>
+                <textarea name="comment_text" id="commentText" rows="2" placeholder="توضیحات اضافی خود را وارد کنید..." style="width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--border); resize: vertical;"></textarea>
             </div>
             <div style="text-align: left;">
                 <button type="submit" name="submit_comment" class="btn-submit" style="background: linear-gradient(135deg, #8b5cf6, #7c3aed); padding: 6px 16px;">
@@ -1178,33 +1235,92 @@ ob_start();
         </form>
         
         <!-- لیست یادداشت‌ها -->
-        <?php if (!empty($comments)): ?>
-            <div style="border-top: 1px solid var(--border); padding-top: 15px; margin-top: 10px;">
-                <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-muted);"><i class="fas fa-list"></i> یادداشت‌های ثبت شده</h4>
-                <?php foreach ($comments as $comment): ?>
-                    <div style="background: #f8fafc; border-radius: 12px; padding: 10px 15px; margin-bottom: 10px; position: relative;">
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                            <div>
-                                <strong style="font-size: 12px;"><?php echo htmlspecialchars($comment['full_name']); ?></strong>
-                                <span style="font-size: 10px; color: #94a3b8; margin-right: 10px;"><?php echo jdate('Y/m-d H:i', strtotime($comment['created_at'])); ?></span>
-                            </div>
-                            <?php if ($is_admin || $comment['user_id'] == $user_id): ?>
-                                <form method="POST" onsubmit="return confirm('آیا از حذف این یادداشت اطمینان دارید؟')">
-                                    <input type="hidden" name="action" value="delete_comment">
-                                    <input type="hidden" name="comment_id" value="<?php echo $comment['id']; ?>">
-                                    <button type="submit" style="background: none; border: none; cursor: pointer; color: #ef4444; font-size: 14px;" title="حذف">
+        <div id="commentsList">
+            <?php if (!empty($comments)): ?>
+                <div style="border-top: 1px solid var(--border); padding-top: 15px; margin-top: 10px;">
+                    <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-muted);"><i class="fas fa-list"></i> یادداشت‌های ثبت شده</h4>
+                    <?php foreach ($comments as $comment): ?>
+                        <div class="comment-item" data-comment-id="<?php echo $comment['id']; ?>" style="background: #f8fafc; border-radius: 12px; padding: 10px 15px; margin-bottom: 10px; position: relative;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                                <div>
+                                    <strong style="font-size: 12px;"><?php echo htmlspecialchars($comment['full_name']); ?></strong>
+                                    <span style="font-size: 10px; color: #94a3b8; margin-right: 10px;"><?php echo jdate('Y/m/d', strtotime($comment['created_at'])); ?></span>
+                                </div>
+                                <?php if ($is_admin || $comment['user_id'] == $user_id): ?>
+                                    <button type="button" class="delete-comment-btn" data-comment-id="<?php echo $comment['id']; ?>" style="background: none; border: none; cursor: pointer; color: #ef4444; font-size: 14px;" title="حذف">
                                         <i class="fas fa-times"></i>
                                     </button>
-                                </form>
-                            <?php endif; ?>
+                                <?php endif; ?>
+                            </div>
+                            <p style="font-size: 12px; margin-top: 8px; margin-bottom: 0; color: var(--text-main);"><?php echo nl2br(htmlspecialchars($comment['comment'])); ?></p>
                         </div>
-                        <p style="font-size: 12px; margin-top: 8px; margin-bottom: 0; color: var(--text-main);"><?php echo nl2br(htmlspecialchars($comment['comment'])); ?></p>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-        <?php endif; ?>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
     </div>
 </div>
+
+<script>
+// ثبت کامنت با AJAX (بدون رفرش و حفظ موقعیت)
+document.getElementById('commentForm')?.addEventListener('submit', function(e) {
+    e.preventDefault();
+    const formData = new FormData(this);
+    const commentText = document.getElementById('commentText').value.trim();
+    
+    if (!commentText) {
+        alert('لطفاً متن یادداشت را وارد کنید');
+        return;
+    }
+    
+    fetch(window.location.href, {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.text())
+    .then(html => {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const newCommentsList = doc.getElementById('commentsList')?.innerHTML;
+        if (newCommentsList) {
+            document.getElementById('commentsList').innerHTML = newCommentsList;
+        }
+        document.getElementById('commentText').value = '';
+    })
+    .catch(error => console.error('Error:', error));
+});
+
+// حذف کامنت با AJAX
+document.querySelectorAll('.delete-comment-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        const commentId = this.getAttribute('data-comment-id');
+        if (!confirm('آیا از حذف این یادداشت اطمینان دارید؟')) return;
+        
+        const formData = new FormData();
+        formData.append('action', 'delete_comment');
+        formData.append('comment_id', commentId);
+        
+        fetch(window.location.href, {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.text())
+        .then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const newCommentsList = doc.getElementById('commentsList')?.innerHTML;
+            if (newCommentsList) {
+                document.getElementById('commentsList').innerHTML = newCommentsList;
+                // reconnect delete buttons
+                document.querySelectorAll('.delete-comment-btn').forEach(newBtn => {
+                    newBtn.addEventListener('click', arguments.callee);
+                });
+            }
+        })
+        .catch(error => console.error('Error:', error));
+    });
+});
+</script>
 
 <!-- ========== فرم تأیید/رد برای کاربر دریافت‌کننده (با مودال رمز) ========== -->
 <?php if ($can_approve && !$is_financial_delivered): ?>
