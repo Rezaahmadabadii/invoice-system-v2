@@ -297,6 +297,46 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             }
         }
     }
+    
+    // ========== افزودن کامنت جدید ==========
+    elseif ($action == 'add_comment' && isset($_POST['submit_comment'])) {
+        $comment_text = trim($_POST['comment_text'] ?? '');
+        if (!empty($comment_text)) {
+            $insert = $pdo->prepare("INSERT INTO document_comments (document_id, user_id, comment) VALUES (?, ?, ?)");
+            $insert->execute([$id, $user_id, $comment_text]);
+            
+            $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'add_comment', ?)");
+            $history->execute([$id, $user_id, 'یادداشت اضافه شد: ' . mb_substr($comment_text, 0, 100)]);
+            
+            $success = 'یادداشت با موفقیت ثبت شد.';
+            echo '<script>setTimeout(function() { window.location.reload(); }, 1000);</script>';
+        } else {
+            $error = 'لطفاً متن یادداشت را وارد کنید.';
+        }
+    }
+    
+    // ========== حذف کامنت ==========
+    elseif ($action == 'delete_comment') {
+        $comment_id = (int)($_POST['comment_id'] ?? 0);
+        if ($comment_id > 0) {
+            $check = $pdo->prepare("SELECT user_id FROM document_comments WHERE id = ? AND document_id = ?");
+            $check->execute([$comment_id, $id]);
+            $comment_owner = $check->fetchColumn();
+            
+            if ($is_admin || $comment_owner == $user_id) {
+                $delete = $pdo->prepare("DELETE FROM document_comments WHERE id = ?");
+                $delete->execute([$comment_id]);
+                
+                $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'delete_comment', ?)");
+                $history->execute([$id, $user_id, 'یادداشت حذف شد']);
+                
+                $success = 'یادداشت با موفقیت حذف شد.';
+                echo '<script>setTimeout(function() { window.location.reload(); }, 1000);</script>';
+            } else {
+                $error = 'شما مجاز به حذف این یادداشت نیستید.';
+            }
+        }
+    }
 }
 
 // ========== دریافت کامنت‌های فاکتور ==========
