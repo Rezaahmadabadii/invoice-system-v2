@@ -36,6 +36,7 @@ $years = range($current_year - 2, $current_year + 2);
 
 $filter_company = $_GET['company'] ?? '';
 $filter_status = $_GET['status'] ?? '';
+$filter_financial = $_GET['financial_delivered'] ?? ''; // فیلتر جدید
 $search = $_GET['search'] ?? '';
 
 $date_condition = "";
@@ -69,7 +70,7 @@ if (empty($user_roles) && isset($_SESSION['user_id'])) {
 $is_admin_user = in_array('admin', $user_roles) || in_array('super_admin', $user_roles);
 $is_admin_flag = $is_admin_user ? 'admin' : 'no';
 
-// ========== کوئری اصلی ==========
+// ========== کوئری اصلی با فیلتر جدید ==========
 $sql = "SELECT d.*, c.name as company_name, c.short_name, v.name as vendor_name,
                creator.full_name as creator_name,
                (SELECT COUNT(*) FROM document_approvals WHERE document_id = d.id) as total_approvers,
@@ -97,6 +98,11 @@ if ($filter_status) {
     $sql .= " AND d.status = ?";
     $params_main[] = $filter_status;
 }
+if ($filter_financial === 'yes') {
+    $sql .= " AND d.financial_delivered = 1";
+} elseif ($filter_financial === 'no') {
+    $sql .= " AND (d.financial_delivered = 0 OR d.financial_delivered IS NULL)";
+}
 if ($search) {
     $sql .= " AND (d.document_number LIKE ? OR d.title LIKE ? OR c.name LIKE ? OR v.name LIKE ?)";
     $params_main[] = "%$search%";
@@ -110,7 +116,7 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params_main);
 $invoices = $stmt->fetchAll();
 
-// ========== تاریخچه (۲ رویداد آخر - بدون تکرار) ==========
+// ========== تاریخچه (۲ رویداد آخر) ==========
 $history_sql = "SELECT 
                    fh.*,
                    u_from.full_name as from_name,
@@ -130,9 +136,7 @@ $history_sql = "SELECT
                 )
                 AND fh.id IN (
                     SELECT MAX(id) FROM forwarding_history 
-                    WHERE document_id IN (
-                        SELECT id FROM documents WHERE type = 'invoice'
-                    )
+                    WHERE document_id IN (SELECT id FROM documents WHERE type = 'invoice')
                     GROUP BY document_id
                 )";
 
@@ -145,6 +149,11 @@ if ($filter_company) {
 if ($filter_status) {
     $history_sql .= " AND d.status = ?";
     $history_params[] = $filter_status;
+}
+if ($filter_financial === 'yes') {
+    $history_sql .= " AND d.financial_delivered = 1";
+} elseif ($filter_financial === 'no') {
+    $history_sql .= " AND (d.financial_delivered = 0 OR d.financial_delivered IS NULL)";
 }
 if ($search) {
     $history_sql .= " AND (d.document_number LIKE ? OR d.title LIKE ?)";
@@ -169,6 +178,7 @@ $completed_invoices = count(array_filter($invoices, fn($i) => $i['status'] == 'f
 $pending_invoices = count(array_filter($invoices, fn($i) => in_array($i['status'], ['pending_approval', 'partially_approved', 'ready_to_close'])));
 $draft_count = count(array_filter($invoices, fn($i) => $i['status'] == 'draft'));
 $rejected_count = count(array_filter($invoices, fn($i) => $i['status'] == 'rejected'));
+$financial_delivered_count = count(array_filter($invoices, fn($i) => ($i['financial_delivered'] ?? 0) == 1));
 
 $page_title = 'مدیریت فاکتورها';
 ob_start();
@@ -182,9 +192,27 @@ ob_start();
         --success: #10b981;
         --warning: #f59e0b;
         --danger: #ef4444;
+        --financial: #4caf50;
         --border: #e2e8f0;
         --text-main: #0f172a;
         --text-muted: #64748b;
+    }
+    
+    /* کارت تحویل مالی شده */
+    .invoice-card.financial-delivered {
+        background: #e8f5e9;
+        border-right: 4px solid #4caf50;
+    }
+    
+    .financial-badge {
+        background: #4caf50;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-size: 9px;
+        font-weight: 500;
+        display: inline-block;
+        margin-right: 8px;
     }
     
     /* انیمیشن سبد خرید */
@@ -209,7 +237,7 @@ ob_start();
     
     .stats-grid {
         display: grid;
-        grid-template-columns: repeat(5, 1fr);
+        grid-template-columns: repeat(6, 1fr);
         gap: 15px;
         margin-bottom: 25px;
     }
@@ -221,6 +249,7 @@ ob_start();
     }
     .stat-card.draft-card { background: linear-gradient(135deg, var(--warning), #d97706); }
     .stat-card.rejected-card { background: linear-gradient(135deg, var(--danger), #dc2626); }
+    .stat-card.financial-card { background: linear-gradient(135deg, #4caf50, #2e7d32); }
     .stat-card div:first-child { font-size: 13px; opacity: 0.9; }
     .stat-card div:last-child { font-size: 28px; font-weight: bold; }
     
@@ -297,6 +326,7 @@ ob_start();
     .status-bar-ready_to_close { background: #10b981; }
     .status-bar-final_approved { background: #10b981; }
     .status-bar-rejected { background: #ef4444; }
+    .status-bar-financial { background: #4caf50; }
     
     .card-content {
         padding: 14px;
@@ -334,6 +364,13 @@ ob_start();
         align-items: baseline;
         margin-bottom: 6px;
         font-size: 10px;
+    }
+    
+    .info-row.financial-row {
+        background: #e8f5e9;
+        padding: 4px 8px;
+        border-radius: 8px;
+        margin-top: 6px;
     }
     
     .info-label {
@@ -462,7 +499,7 @@ ob_start();
         align-items: center;
     }
     
-    /* ========== تاریخچه در بالای صفحه ========== */
+    /* ========== تاریخچه ========== */
     .history-top {
         background: white;
         border-radius: 16px;
@@ -714,29 +751,30 @@ ob_start();
         .cart-slide-right { transform: translateX(100px); opacity: 0; }
     }
 </style>
-    
-    <!-- هدر و دکمه فاکتور جدید -->
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
-        <h1 style="color: #2c3e50; margin: 0; font-size: 22px;">📄 مدیریت فاکتورها</h1>
-        <div style="display: flex; align-items: center; gap: 15px;">
-            <div style="display: inline-flex; align-items: center; gap: 10px;">
-                <div class="cart-icon" id="cartIcon" style="font-size: 28px; display: inline-block; cursor: pointer; line-height: 1;">🛒</div>
-                <button type="button" id="createInvoiceBtn" class="btn-create">➕ فاکتور جدید</button>
-            </div>
-            <a href="dashboard.php" class="back-link-footer">بازگشت</a>
+
+<!-- هدر و دکمه فاکتور جدید -->
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+    <h1 style="color: #2c3e50; margin: 0; font-size: 22px;">📄 مدیریت فاکتورها</h1>
+    <div style="display: flex; align-items: center; gap: 15px;">
+        <div style="display: inline-flex; align-items: center; gap: 10px;">
+            <div class="cart-icon" id="cartIcon" style="font-size: 28px; display: inline-block; cursor: pointer; line-height: 1;">🛒</div>
+            <button type="button" id="createInvoiceBtn" class="btn-create">➕ فاکتور جدید</button>
         </div>
+        <a href="dashboard.php" class="back-link-footer">بازگشت</a>
     </div>
+</div>
 
-    <!-- آمار -->
-    <div class="stats-grid">
-        <div class="stat-card"><div>📋 کل فاکتورها</div><div><?php echo number_format($total_invoices); ?></div></div>
-        <div class="stat-card" style="background: linear-gradient(135deg, #2ecc71, #27ae60);"><div>✅ نهایی شده</div><div><?php echo number_format($completed_invoices); ?></div></div>
-        <div class="stat-card" style="background: linear-gradient(135deg, #f39c12, #e67e22);"><div>⏳ در انتظار</div><div><?php echo number_format($pending_invoices); ?></div></div>
-        <div class="stat-card rejected-card"><div>❌ رد شده</div><div><?php echo number_format($rejected_count); ?></div></div>
-        <div class="stat-card draft-card"><div>📝 پیش‌نویس</div><div><?php echo number_format($draft_count); ?></div></div>
-    </div>
+<!-- آمار -->
+<div class="stats-grid">
+    <div class="stat-card"><div>📋 کل فاکتورها</div><div><?php echo number_format($total_invoices); ?></div></div>
+    <div class="stat-card" style="background: linear-gradient(135deg, #2ecc71, #27ae60);"><div>✅ نهایی شده</div><div><?php echo number_format($completed_invoices); ?></div></div>
+    <div class="stat-card" style="background: linear-gradient(135deg, #f39c12, #e67e22);"><div>⏳ در انتظار</div><div><?php echo number_format($pending_invoices); ?></div></div>
+    <div class="stat-card rejected-card"><div>❌ رد شده</div><div><?php echo number_format($rejected_count); ?></div></div>
+    <div class="stat-card draft-card"><div>📝 پیش‌نویس</div><div><?php echo number_format($draft_count); ?></div></div>
+    <div class="stat-card financial-card"><div>🚚 تحویل مالی</div><div><?php echo number_format($financial_delivered_count); ?></div></div>
+</div>
 
-<!-- ========== تاریخچه (بین آمار و فیلترها) ========== -->
+<!-- ========== تاریخچه ========== -->
 <div class="history-top">
     <div class="history-top-title">
         <i class="fas fa-history"></i>
@@ -766,12 +804,9 @@ ob_start();
                         $history_count++;
                         $full_date = jdate('Y/m-d H:i', strtotime($h['created_at']));
                         
-                        // ========== محاسبه مدت پیگیری با استفاده از doc_created_at ==========
-                        // اگر در کوئری doc_created_at را انتخاب کرده‌اید
                         if (isset($h['doc_created_at']) && !empty($h['doc_created_at'])) {
                             $doc_created_at = $h['doc_created_at'];
                         } else {
-                            // در غیر این صورت از دیتابیس بگیر
                             $doc_stmt = $pdo->prepare("SELECT created_at FROM documents WHERE id = ?");
                             $doc_stmt->execute([$h['document_id']]);
                             $doc_created_at = $doc_stmt->fetchColumn();
@@ -799,7 +834,6 @@ ob_start();
                             $days = floor($diff_seconds / 86400);
                             $duration = $days . ' روز';
                         }
-                        // =======================================
                         
                         $status_class = '';
                         $status_text = '';
@@ -817,6 +851,10 @@ ob_start();
                             $status_class = 'status-closed';
                             $status_text = 'بسته شده';
                             $status_icon = '🔒';
+                        } elseif ($h['action'] == 'financial_deliver') {
+                            $status_class = 'status-closed';
+                            $status_text = 'تحویل مالی';
+                            $status_icon = '🚚';
                         } elseif ($h['action'] == 'forward') {
                             $status_class = 'status-pending';
                             $status_text = 'در جریان';
@@ -845,146 +883,163 @@ ob_start();
     </div>
 </div>
 
-    <!-- فیلترها -->
-    <div class="filters-container">
-        <div class="search-box">
-            <i class="fas fa-search"></i>
-            <input type="text" id="searchInput" placeholder="    جستجو..." value="<?php echo htmlspecialchars($search); ?>">
-        </div>
-        <div class="year-month" style="display: flex; gap: 8px;">
-            <select id="yearSelect">
-                <?php foreach ($years as $y): ?>
-                    <option value="<?php echo $y; ?>" <?php echo $selected_year == $y ? 'selected' : ''; ?>><?php echo $y; ?></option>
-                <?php endforeach; ?>
-            </select>
-            <select id="monthSelect">
-                <?php foreach ($months as $num => $name): ?>
-                    <option value="<?php echo $num; ?>" <?php echo $selected_month == $num ? 'selected' : ''; ?>><?php echo $name; ?></option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        <div class="status-filter">
-            <select id="statusFilter">
-                <option value="">همه وضعیت‌ها</option>
-                <option value="draft" <?php echo $filter_status == 'draft' ? 'selected' : ''; ?>>پیش‌نویس</option>
-                <option value="pending_approval" <?php echo $filter_status == 'pending_approval' ? 'selected' : ''; ?>>در انتظار تأیید</option>
-                <option value="partially_approved" <?php echo $filter_status == 'partially_approved' ? 'selected' : ''; ?>>تأیید نسبی</option>
-                <option value="ready_to_close" <?php echo $filter_status == 'ready_to_close' ? 'selected' : ''; ?>>آماده تأیید نهایی</option>
-                <option value="final_approved" <?php echo $filter_status == 'final_approved' ? 'selected' : ''; ?>>نهایی شده</option>
-                <option value="rejected" <?php echo $filter_status == 'rejected' ? 'selected' : ''; ?>>رد شده</option>
-            </select>
-        </div>
-        <div class="status-filter">
-            <select id="companyFilter">
-                <option value="">همه شرکت‌ها</option>
-                <?php foreach ($companies as $comp): ?>
-                    <option value="<?php echo $comp['id']; ?>" <?php echo $filter_company == $comp['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($comp['name']); ?></option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        <button class="filter-btn" id="applyFilterBtn">اعمال</button>
-        <a href="inbox.php" class="filter-btn reset">پاک کردن</a>
+<!-- فیلترها -->
+<div class="filters-container">
+    <div class="search-box">
+        <i class="fas fa-search"></i>
+        <input type="text" id="searchInput" placeholder="   جستجو..." value="<?php echo htmlspecialchars($search); ?>">
     </div>
+    <div class="year-month" style="display: flex; gap: 8px;">
+        <select id="yearSelect">
+            <?php foreach ($years as $y): ?>
+                <option value="<?php echo $y; ?>" <?php echo $selected_year == $y ? 'selected' : ''; ?>><?php echo $y; ?></option>
+            <?php endforeach; ?>
+        </select>
+        <select id="monthSelect">
+            <?php foreach ($months as $num => $name): ?>
+                <option value="<?php echo $num; ?>" <?php echo $selected_month == $num ? 'selected' : ''; ?>><?php echo $name; ?></option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+    <div class="status-filter">
+        <select id="statusFilter">
+            <option value="">همه وضعیت‌ها</option>
+            <option value="draft" <?php echo $filter_status == 'draft' ? 'selected' : ''; ?>>پیش‌نویس</option>
+            <option value="pending_approval" <?php echo $filter_status == 'pending_approval' ? 'selected' : ''; ?>>در انتظار تأیید</option>
+            <option value="partially_approved" <?php echo $filter_status == 'partially_approved' ? 'selected' : ''; ?>>تأیید نسبی</option>
+            <option value="ready_to_close" <?php echo $filter_status == 'ready_to_close' ? 'selected' : ''; ?>>آماده تأیید نهایی</option>
+            <option value="final_approved" <?php echo $filter_status == 'final_approved' ? 'selected' : ''; ?>>نهایی شده</option>
+            <option value="rejected" <?php echo $filter_status == 'rejected' ? 'selected' : ''; ?>>رد شده</option>
+        </select>
+    </div>
+    <div class="status-filter">
+        <select id="financialFilter">
+            <option value="">همه</option>
+            <option value="yes" <?php echo $filter_financial === 'yes' ? 'selected' : ''; ?>>🚚 تحویل مالی شده</option>
+            <option value="no" <?php echo $filter_financial === 'no' ? 'selected' : ''; ?>>❌ تحویل مالی نشده</option>
+        </select>
+    </div>
+    <div class="status-filter">
+        <select id="companyFilter">
+            <option value="">همه شرکت‌ها</option>
+            <?php foreach ($companies as $comp): ?>
+                <option value="<?php echo $comp['id']; ?>" <?php echo $filter_company == $comp['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($comp['name']); ?></option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+    <button class="filter-btn" id="applyFilterBtn">اعمال</button>
+    <a href="inbox.php" class="filter-btn reset">پاک کردن</a>
+</div>
 
-    <!-- کارت‌های فاکتور -->
-    <div class="cards-list">
-        <?php if (empty($invoices)): ?>
-            <div class="empty-state"><i class="fas fa-file-invoice" style="font-size: 40px;"></i><p>هیچ فاکتوری یافت نشد</p></div>
-        <?php else: ?>
-            <?php foreach ($invoices as $inv): 
-                $isDraft = ($inv['status'] == 'draft');
-                $shamsi_date = jdate('Y/m/d', strtotime($inv['created_at']));
-                $total_approvers = $inv['total_approvers'] ?? 0;
-                $approved_count = $inv['approved_count'] ?? 0;
-                $progress_percent = $total_approvers > 0 ? round(($approved_count / $total_approvers) * 100) : 0;
-                
-                $needs_approval = false;
-                if (!$isDraft && !in_array($inv['status'], ['final_approved', 'rejected'])) {
-                    $check_stmt = $pdo->prepare("SELECT status FROM document_approvals WHERE document_id = ? AND user_id = ?");
-                    $check_stmt->execute([$inv['id'], $user_id]);
-                    $approval_status = $check_stmt->fetchColumn();
-                    $needs_approval = in_array($approval_status, ['pending', 'viewed']);
-                }
-            ?>
-            <div class="invoice-card">
-                <div class="card-status-bar status-bar-<?php echo $inv['status']; ?>"></div>
-                <div class="card-content">
-                    <div class="card-header">
-                        <span class="doc-number"><i class="fas fa-file-alt"></i> <?php echo htmlspecialchars($inv['document_number']); ?></span>
-                        <?php if ($isDraft): ?>
-                            <span class="draft-badge"><i class="fas fa-pen-fancy"></i> پیش‌نویس</span>
-                        <?php endif; ?>
-                    </div>
-                    <div class="card-title" title="<?php echo htmlspecialchars($inv['title']); ?>">
-                        <?php echo htmlspecialchars(mb_substr($inv['title'], 0, 35)) . (mb_strlen($inv['title']) > 35 ? '...' : ''); ?>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">💰 مبلغ</span>
-                        <span class="info-value amount-value"><?php echo number_format($inv['amount'] ?? 0); ?> تومان</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">🏢 شرکت</span>
-                        <span class="info-value"><?php echo htmlspecialchars($inv['company_name'] ?? '-'); ?></span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">🏪 فروشنده</span>
-                        <span class="info-value"><?php echo htmlspecialchars($inv['vendor_name'] ?? '-'); ?></span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">📅 تاریخ</span>
-                        <span class="info-value"><?php echo $shamsi_date; ?></span>
-                    </div>
-                    
-                    <?php if ($total_approvers > 0 && !in_array($inv['status'], ['final_approved', 'rejected', 'draft'])): ?>
-                    <div class="approval-progress-mini">
-                        <div class="progress-mini-bar">
-                            <div class="progress-mini-fill" style="width: <?php echo $progress_percent; ?>%;"></div>
-                        </div>
-                        <div class="progress-mini-stats">
-                            <?php echo $approved_count; ?> از <?php echo $total_approvers; ?> نفر تأیید کردند
-                        </div>
-                    </div>
+<!-- کارت‌های فاکتور -->
+<div class="cards-list">
+    <?php if (empty($invoices)): ?>
+        <div class="empty-state"><i class="fas fa-file-invoice" style="font-size: 40px;"></i><p>هیچ فاکتوری یافت نشد</p></div>
+    <?php else: ?>
+        <?php foreach ($invoices as $inv): 
+            $isDraft = ($inv['status'] == 'draft');
+            $isFinancialDelivered = ($inv['financial_delivered'] ?? 0) == 1;
+            $shamsi_date = jdate('Y/m/d', strtotime($inv['created_at']));
+            $total_approvers = $inv['total_approvers'] ?? 0;
+            $approved_count = $inv['approved_count'] ?? 0;
+            $progress_percent = $total_approvers > 0 ? round(($approved_count / $total_approvers) * 100) : 0;
+            
+            $needs_approval = false;
+            if (!$isDraft && !in_array($inv['status'], ['final_approved', 'rejected']) && !$isFinancialDelivered) {
+                $check_stmt = $pdo->prepare("SELECT status FROM document_approvals WHERE document_id = ? AND user_id = ?");
+                $check_stmt->execute([$inv['id'], $user_id]);
+                $approval_status = $check_stmt->fetchColumn();
+                $needs_approval = in_array($approval_status, ['pending', 'viewed']);
+            }
+        ?>
+        <div class="invoice-card <?php echo $isFinancialDelivered ? 'financial-delivered' : ''; ?>">
+            <div class="card-status-bar status-bar-<?php echo $isFinancialDelivered ? 'financial' : $inv['status']; ?>"></div>
+            <div class="card-content">
+                <div class="card-header">
+                    <span class="doc-number"><i class="fas fa-file-alt"></i> <?php echo htmlspecialchars($inv['document_number']); ?></span>
+                    <?php if ($isDraft): ?>
+                        <span class="draft-badge"><i class="fas fa-pen-fancy"></i> پیش‌نویس</span>
                     <?php endif; ?>
-                    
-                    <div class="card-actions">
-                        <?php if ($needs_approval): ?>
-                            <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn approve" title="تأیید فاکتور"><i class="fas fa-check-circle"></i> تأیید</a>
-                        <?php else: ?>
-                            <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات"><i class="fas fa-eye"></i> مشاهده</a>
-                        <?php endif; ?>
-                        
-                        <?php if (!empty($inv['file_path'])):
-                            $file_ext = strtolower(pathinfo($inv['file_path'], PATHINFO_EXTENSION));
-                            $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
-                            $is_pdf = ($file_ext == 'pdf');
-                            $file_icon = ($is_image) ? 'fa-image' : (($is_pdf) ? 'fa-file-pdf' : 'fa-file-alt');
-                            $file_color = ($is_image) ? '#27ae60' : (($is_pdf) ? '#e74c3c' : '#3498db');
-                        ?>
-                            <button type="button" class="action-btn file" 
-                                    data-file="<?php echo htmlspecialchars($inv['file_path']); ?>" 
-                                    data-filename="<?php echo htmlspecialchars($inv['file_name'] ?? basename($inv['file_path'])); ?>"
-                                    data-type="<?php echo $is_pdf ? 'pdf' : ($is_image ? 'image' : 'other'); ?>"
-                                    style="color: <?php echo $file_color; ?>; background: <?php echo $file_color; ?>10;"
-                                    onclick="openFileModal(this)" 
-                                    title="مشاهده فایل">
-                                <i class="fas <?php echo $file_icon; ?>"></i>
-                            </button>
-                        <?php endif; ?>
-                        
-                        <?php if ($inv['created_by'] == $user_id || $is_admin_user): ?>
-                            <?php if ($isDraft): ?>
-                                <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn finalize" title="تکمیل"><i class="fas fa-check-circle"></i> تکمیل</a>
-                            <?php elseif (!in_array($inv['status'], ['final_approved', 'rejected'])): ?>
-                                <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش"><i class="fas fa-edit"></i></a>
-                            <?php endif; ?>
-                            <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')"><i class="fas fa-trash-alt"></i></a>
-                        <?php endif; ?>
+                    <?php if ($isFinancialDelivered): ?>
+                        <span class="financial-badge">🚚 تحویل مالی</span>
+                    <?php endif; ?>
+                </div>
+                <div class="card-title" title="<?php echo htmlspecialchars($inv['title']); ?>">
+                    <?php echo htmlspecialchars(mb_substr($inv['title'], 0, 35)) . (mb_strlen($inv['title']) > 35 ? '...' : ''); ?>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">💰 مبلغ</span>
+                    <span class="info-value amount-value"><?php echo number_format($inv['amount'] ?? 0); ?> تومان</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">🏢 شرکت</span>
+                    <span class="info-value"><?php echo htmlspecialchars($inv['company_name'] ?? '-'); ?></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">🏪 فروشنده</span>
+                    <span class="info-value"><?php echo htmlspecialchars($inv['vendor_name'] ?? '-'); ?></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">📅 تاریخ</span>
+                    <span class="info-value"><?php echo $shamsi_date; ?></span>
+                </div>
+                
+                <?php if ($isFinancialDelivered && $inv['financial_delivered_at']): ?>
+                <div class="info-row financial-row">
+                    <span class="info-label">🚚 تاریخ تحویل به مالی</span>
+                    <span class="info-value" style="color: #2e7d32; font-weight: bold;"><?php echo jdate('Y/m-d', strtotime($inv['financial_delivered_at'])); ?></span>
+                </div>
+                <?php endif; ?>
+                
+                <?php if ($total_approvers > 0 && !in_array($inv['status'], ['final_approved', 'rejected', 'draft']) && !$isFinancialDelivered): ?>
+                <div class="approval-progress-mini">
+                    <div class="progress-mini-bar">
+                        <div class="progress-mini-fill" style="width: <?php echo $progress_percent; ?>%;"></div>
+                    </div>
+                    <div class="progress-mini-stats">
+                        <?php echo $approved_count; ?> از <?php echo $total_approvers; ?> نفر تأیید کردند
                     </div>
                 </div>
+                <?php endif; ?>
+                
+                <div class="card-actions">
+                    <?php if ($needs_approval && !$isFinancialDelivered): ?>
+                        <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn approve" title="تأیید فاکتور"><i class="fas fa-check-circle"></i> تأیید</a>
+                    <?php else: ?>
+                        <a href="invoice-view.php?id=<?php echo $inv['id']; ?>" class="action-btn view" title="مشاهده جزئیات"><i class="fas fa-eye"></i> مشاهده</a>
+                    <?php endif; ?>
+                    
+                    <?php if (!empty($inv['file_path'])):
+                        $file_ext = strtolower(pathinfo($inv['file_path'], PATHINFO_EXTENSION));
+                        $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']);
+                        $is_pdf = ($file_ext == 'pdf');
+                        $file_icon = ($is_image) ? 'fa-image' : (($is_pdf) ? 'fa-file-pdf' : 'fa-file-alt');
+                        $file_color = ($is_image) ? '#27ae60' : (($is_pdf) ? '#e74c3c' : '#3498db');
+                    ?>
+                        <button type="button" class="action-btn file" 
+                                data-file="<?php echo htmlspecialchars($inv['file_path']); ?>" 
+                                data-filename="<?php echo htmlspecialchars($inv['file_name'] ?? basename($inv['file_path'])); ?>"
+                                data-type="<?php echo $is_pdf ? 'pdf' : ($is_image ? 'image' : 'other'); ?>"
+                                style="color: <?php echo $file_color; ?>; background: <?php echo $file_color; ?>10;"
+                                onclick="openFileModal(this)" 
+                                title="مشاهده فایل">
+                            <i class="fas <?php echo $file_icon; ?>"></i>
+                        </button>
+                    <?php endif; ?>
+                    
+                    <?php if (($inv['created_by'] == $user_id || $is_admin_user) && !$isFinancialDelivered): ?>
+                        <?php if ($isDraft): ?>
+                            <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn finalize" title="تکمیل"><i class="fas fa-check-circle"></i> تکمیل</a>
+                        <?php elseif (!in_array($inv['status'], ['final_approved', 'rejected'])): ?>
+                            <a href="invoice-edit.php?id=<?php echo $inv['id']; ?>" class="action-btn edit" title="ویرایش"><i class="fas fa-edit"></i></a>
+                        <?php endif; ?>
+                        <a href="invoice-delete.php?id=<?php echo $inv['id']; ?>" class="action-btn delete" title="حذف" onclick="return confirm('حذف شود؟')"><i class="fas fa-trash-alt"></i></a>
+                    <?php endif; ?>
+                </div>
             </div>
-            <?php endforeach; ?>
-        <?php endif; ?>
-    </div>
+        </div>
+        <?php endforeach; ?>
+    <?php endif; ?>
 </div>
 
 <script>
@@ -1007,15 +1062,17 @@ document.getElementById('createInvoiceBtn')?.addEventListener('click', function(
 function applyFilters() {
     let search = document.getElementById('searchInput').value;
     let status = document.getElementById('statusFilter').value;
+    let financial = document.getElementById('financialFilter').value;
     let company = document.getElementById('companyFilter').value;
     let year = document.getElementById('yearSelect').value;
     let month = document.getElementById('monthSelect').value;
     let url = 'inbox.php?';
     if (search) url += 'search=' + encodeURIComponent(search);
     if (status) url += (search ? '&' : '') + 'status=' + encodeURIComponent(status);
-    if (company) url += (search || status ? '&' : '') + 'company=' + encodeURIComponent(company);
-    if (year) url += (search || status || company ? '&' : '') + 'year=' + encodeURIComponent(year);
-    if (month) url += (search || status || company || year ? '&' : '') + 'month=' + encodeURIComponent(month);
+    if (financial) url += (search || status ? '&' : '') + 'financial_delivered=' + encodeURIComponent(financial);
+    if (company) url += (search || status || financial ? '&' : '') + 'company=' + encodeURIComponent(company);
+    if (year) url += (search || status || financial || company ? '&' : '') + 'year=' + encodeURIComponent(year);
+    if (month) url += (search || status || financial || company || year ? '&' : '') + 'month=' + encodeURIComponent(month);
     window.location.href = url;
 }
 
@@ -1146,7 +1203,6 @@ function refreshCards() {
             const cardsContainer = document.querySelector('.cards-list');
             
             if (newCards && cardsContainer && cardsContainer.innerHTML !== newCards) {
-                // ذخیره وضعیت اسکرول
                 const scrollPos = cardsContainer.scrollTop;
                 cardsContainer.innerHTML = newCards;
                 cardsContainer.scrollTop = scrollPos;
@@ -1156,16 +1212,12 @@ function refreshCards() {
         .catch(error => console.error('خطا در به‌روزرسانی کارت‌ها:', error));
 }
 
-// ========== تابع اصلی به‌روزرسانی ==========
 function refreshData() {
-    updateBadges();  // به‌روزرسانی شمارنده منو
-    refreshCards();  // به‌روزرسانی لیست کارت‌ها
+    updateBadges();
+    refreshCards();
 }
 
-// هر 5 ثانیه یکبار به‌روزرسانی کن
 setInterval(refreshData, 5000);
-
-// یکبار در ابتدا اجرا کن
 refreshData();
 </script>
 
