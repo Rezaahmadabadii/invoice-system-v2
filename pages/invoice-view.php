@@ -246,11 +246,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         if (!password_verify($password, $user_data['password'])) {
             $error = 'رمز عبور اشتباه است. درخواست انجام نشد.';
         } else {
-            // حذف درخواست قبلی اگر وجود داشته باشد
             $pdo->prepare("DELETE FROM unlock_requests WHERE document_id = ?")->execute([$id]);
             $pdo->prepare("DELETE FROM unlock_votes WHERE request_id IN (SELECT id FROM unlock_requests WHERE document_id = ?)")->execute([$id]);
             
-            // ایجاد درخواست جدید
             $insert = $pdo->prepare("INSERT INTO unlock_requests (document_id, requested_by, status) VALUES (?, ?, 'pending')");
             $insert->execute([$id, $user_id]);
             
@@ -277,7 +275,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'vote_unlock', ?)");
             $history->execute([$id, $user_id, 'تأیید برگشت از مالی با امضای دیجیتال']);
             
-            // بررسی آیا همه رأی داده‌اند
             $voted_users = array_column($unlock_votes, 'user_id');
             $voted_users[] = $user_id;
             $all_voted = empty(array_diff($approvers_ids, $voted_users));
@@ -298,103 +295,57 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         }
     }
     
-// ========== افزودن کامنت جدید (AJAX) ==========
-elseif ($action == 'add_comment' && isset($_POST['submit_comment'])) {
-    $comment_text = trim($_POST['comment_text'] ?? '');
-    if (!empty($comment_text)) {
-        $insert = $pdo->prepare("INSERT INTO document_comments (document_id, user_id, comment) VALUES (?, ?, ?)");
-        $insert->execute([$id, $user_id, $comment_text]);
-        
-        $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'add_comment', ?)");
-        $history->execute([$id, $user_id, 'یادداشت اضافه شد: ' . mb_substr($comment_text, 0, 100)]);
-        
-        // برگرداندن محتوای جدید بخش کامنت‌ها
-        $comments_stmt = $pdo->prepare("SELECT dc.*, u.full_name FROM document_comments dc JOIN users u ON dc.user_id = u.id WHERE dc.document_id = ? ORDER BY dc.created_at DESC");
-        $comments_stmt->execute([$id]);
-        $new_comments = $comments_stmt->fetchAll();
-        
-        ob_start();
-        if (!empty($new_comments)): ?>
-            <div style="border-top: 1px solid var(--border); padding-top: 15px; margin-top: 10px;">
-                <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-muted);"><i class="fas fa-list"></i> یادداشت‌های ثبت شده</h4>
-                <?php foreach ($new_comments as $comment): ?>
-                    <div class="comment-item" data-comment-id="<?php echo $comment['id']; ?>" style="background: #f8fafc; border-radius: 12px; padding: 10px 15px; margin-bottom: 10px; position: relative;">
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                            <div>
-                                <strong style="font-size: 12px;"><?php echo htmlspecialchars($comment['full_name']); ?></strong>
-                                <span style="font-size: 10px; color: #94a3b8; margin-right: 10px;"><?php echo jdate('Y/m/d', strtotime($comment['created_at'])); ?></span>
-                            </div>
-                            <?php if ($is_admin || $comment['user_id'] == $user_id): ?>
-                                <button type="button" class="delete-comment-btn" data-comment-id="<?php echo $comment['id']; ?>" style="background: none; border: none; cursor: pointer; color: #ef4444; font-size: 14px;" title="حذف">
-                                    <i class="fas fa-times"></i>
-                                </button>
-                            <?php endif; ?>
-                        </div>
-                        <p style="font-size: 12px; margin-top: 8px; margin-bottom: 0; color: var(--text-main);"><?php echo nl2br(htmlspecialchars($comment['comment'])); ?></p>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-        <?php endif;
-        $html = ob_get_clean();
-        echo $html;
-        exit;
-    } else {
-        echo '<div class="alert alert-danger">لطفاً متن یادداشت را وارد کنید.</div>';
-        exit;
-    }
-}
-
-// ========== حذف کامنت (AJAX) ==========
-elseif ($action == 'delete_comment') {
-    $comment_id = (int)($_POST['comment_id'] ?? 0);
-    if ($comment_id > 0) {
-        $check = $pdo->prepare("SELECT user_id FROM document_comments WHERE id = ? AND document_id = ?");
-        $check->execute([$comment_id, $id]);
-        $comment_owner = $check->fetchColumn();
-        
-        if ($is_admin || $comment_owner == $user_id) {
-            $delete = $pdo->prepare("DELETE FROM document_comments WHERE id = ?");
-            $delete->execute([$comment_id]);
+    // ========== افزودن کامنت جدید ==========
+    elseif ($action == 'add_comment' && isset($_POST['submit_comment'])) {
+        $comment_text = trim($_POST['comment_text'] ?? '');
+        if (!empty($comment_text)) {
+            $insert = $pdo->prepare("INSERT INTO document_comments (document_id, user_id, comment) VALUES (?, ?, ?)");
+            $insert->execute([$id, $user_id, $comment_text]);
             
-            $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'delete_comment', ?)");
-            $history->execute([$id, $user_id, 'یادداشت حذف شد']);
+            $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'add_comment', ?)");
+            $history->execute([$id, $user_id, 'یادداشت اضافه شد: ' . mb_substr($comment_text, 0, 100)]);
             
-            // برگرداندن محتوای جدید بخش کامنت‌ها
-            $comments_stmt = $pdo->prepare("SELECT dc.*, u.full_name FROM document_comments dc JOIN users u ON dc.user_id = u.id WHERE dc.document_id = ? ORDER BY dc.created_at DESC");
-            $comments_stmt->execute([$id]);
-            $new_comments = $comments_stmt->fetchAll();
-            
-            ob_start();
-            if (!empty($new_comments)): ?>
-                <div style="border-top: 1px solid var(--border); padding-top: 15px; margin-top: 10px;">
-                    <h4 style="font-size: 13px; margin-bottom: 12px; color: var(--text-muted);"><i class="fas fa-list"></i> یادداشت‌های ثبت شده</h4>
-                    <?php foreach ($new_comments as $comment): ?>
-                        <div class="comment-item" data-comment-id="<?php echo $comment['id']; ?>" style="background: #f8fafc; border-radius: 12px; padding: 10px 15px; margin-bottom: 10px; position: relative;">
-                            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                                <div>
-                                    <strong style="font-size: 12px;"><?php echo htmlspecialchars($comment['full_name']); ?></strong>
-                                    <span style="font-size: 10px; color: #94a3b8; margin-right: 10px;"><?php echo jdate('Y/m/d', strtotime($comment['created_at'])); ?></span>
-                                </div>
-                                <?php if ($is_admin || $comment['user_id'] == $user_id): ?>
-                                    <button type="button" class="delete-comment-btn" data-comment-id="<?php echo $comment['id']; ?>" style="background: none; border: none; cursor: pointer; color: #ef4444; font-size: 14px;" title="حذف">
-                                        <i class="fas fa-times"></i>
-                                    </button>
-                                <?php endif; ?>
-                            </div>
-                            <p style="font-size: 12px; margin-top: 8px; margin-bottom: 0; color: var(--text-main);"><?php echo nl2br(htmlspecialchars($comment['comment'])); ?></p>
-                        </div>
-                    <?php endforeach; ?>
-                </div>
-            <?php endif;
-            $html = ob_get_clean();
-            echo $html;
-            exit;
+            $success = 'یادداشت با موفقیت ثبت شد.';
+            echo '<script>setTimeout(function() { window.location.reload(); }, 1000);</script>';
         } else {
-            echo '<div class="alert alert-danger">شما مجاز به حذف این یادداشت نیستید.</div>';
-            exit;
+            $error = 'لطفاً متن یادداشت را وارد کنید.';
+        }
+    }
+    
+    // ========== حذف کامنت ==========
+    elseif ($action == 'delete_comment') {
+        $comment_id = (int)($_POST['comment_id'] ?? 0);
+        if ($comment_id > 0) {
+            $check = $pdo->prepare("SELECT user_id FROM document_comments WHERE id = ? AND document_id = ?");
+            $check->execute([$comment_id, $id]);
+            $comment_owner = $check->fetchColumn();
+            
+            if ($is_admin || $comment_owner == $user_id) {
+                $delete = $pdo->prepare("DELETE FROM document_comments WHERE id = ?");
+                $delete->execute([$comment_id]);
+                
+                $history = $pdo->prepare("INSERT INTO forwarding_history (document_id, from_user_id, action, notes) VALUES (?, ?, 'delete_comment', ?)");
+                $history->execute([$id, $user_id, 'یادداشت حذف شد']);
+                
+                $success = 'یادداشت با موفقیت حذف شد.';
+                echo '<script>setTimeout(function() { window.location.reload(); }, 1000);</script>';
+            } else {
+                $error = 'شما مجاز به حذف این یادداشت نیستید.';
+            }
         }
     }
 }
+
+// ========== دریافت کامنت‌های فاکتور ==========
+$comments_stmt = $pdo->prepare("
+    SELECT dc.*, u.full_name 
+    FROM document_comments dc
+    JOIN users u ON dc.user_id = u.id
+    WHERE dc.document_id = ?
+    ORDER BY dc.created_at DESC
+");
+$comments_stmt->execute([$id]);
+$comments = $comments_stmt->fetchAll();
 
 // ========== دریافت کامنت‌های فاکتور ==========
 $comments_stmt = $pdo->prepare("
